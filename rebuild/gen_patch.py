@@ -138,11 +138,12 @@ for(var k=0;k<c.length;k++){var blk=c[k];if(blk.type==='text'){var t=blk.text;va
 }catch(_){}
 }
 function __tsInspect(stream,ctx,depth){
-return (async function*(){
+var __g=(async function*(){
 var buf=[],text='',mode=0;
 var MO=__tsMOpen(),MC=__tsMClose(),MAX=__tsMaxEsc();
 try{
 for await(var ev of stream){
+__tsLog('[esc-in] depth='+depth+' mode='+mode+' ev='+JSON.stringify(ev).slice(0,160));
 if(mode===1){yield ev;continue;}
 var isTD=ev&&ev.type==='content_block_delta'&&ev.delta&&ev.delta.type==='text_delta';
 if(isTD){
@@ -157,6 +158,7 @@ mode=1;for(var b=0;b<buf.length;b++)yield buf[b];yield ev;continue;
 }
 buf.push(ev);
 }
+__tsLog('[esc-end] depth='+depth+' mode='+mode+' buf='+buf.length+' textlen='+text.length);
 }catch(e){__tsLog('[esc] inspector iter error: '+e);}
 if(mode===1)return;
 if(mode===0){for(var b=0;b<buf.length;b++)yield buf[b];return;}
@@ -172,6 +174,11 @@ return;
 }
 if(mode===2){for(var b3=0;b3<buf.length;b3++)yield buf[b3];yield {type:'content_block_delta',index:0,delta:{type:'text_delta',text:text}};}
 })();
+return new Proxy(__g,{has:function(t,k){return (k in t)||(k in stream);},get:function(t,k){
+if(k===Symbol.asyncIterator)return t[Symbol.asyncIterator].bind(t);
+var v=t[k];if(v!==undefined)return v;
+try{var sv=stream[k];return sv;}catch(e){return undefined;}
+}});
 }
 """
 
