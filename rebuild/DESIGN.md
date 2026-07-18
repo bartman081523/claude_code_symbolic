@@ -101,6 +101,7 @@ so streaming, auth headers, signal, and SDK response shaping all stay intact.
 | `TWO_STAGE_STAGE2_TIER` | `sonnet` | judge tier → ditto |
 | `TWO_STAGE_DECIDER_BUDGET` | `2000` | stage-1 thinking budget |
 | `TWO_STAGE_JUDGE_BUDGET` | `16000` | stage-2 thinking budget |
+| `TWO_STAGE_DECIDER_CONCISE` | `1` | if on, tell the decider to produce a SHORT draft (key approach + tentative answer only); the judge writes the full response. Drives the opus-tier token saving. |
 | `TWO_STAGE_TRIGGER_MODELS` | (any) | optional comma-sep allow-list of incoming model names |
 | `TWO_STAGE_DEBUG` | unset | if set (and not `0`/`false`/`no`/`off`), append a per-call trace to `/tmp/ts.log` |
 
@@ -163,11 +164,53 @@ stage2=sonnet tier→`SONNET_MODEL`).  Point `ANTHROPIC_BASE_URL` at
 
 ### Remaining
 
-- Multi-step tool-use turn end-to-end (judge emits `tool_use`, claude-code
-  executes, calls back) — streaming is forwarded unchanged so it should work,
-  but not yet exercised with a real tool loop.
 - Cost check: compare decider+judge token usage vs stock single-model on the
   same task to confirm the Opus-token reduction.
+
+## Cost check (live, via `usage_relay.py`)
+
+Same hard reasoning task (4-seat constraint puzzle), stock vs 2-stage, token
+usage captured by relaying through `usage_relay.py` (127.0.0.1:11500), which
+parses `usage` from non-stream JSON and stream SSE (`message_delta.usage`):
+
+| config | opus-tier (glm) output | sonnet-tier (minimax) output | answer |
+|---|---|---|---|
+| **stock** (single glm, adaptive) | **717** | — (housekeeping only) | 2 ✓ |
+| 2-stage, decider budget 2000, verbose draft | 828 | 1766 | 2 ✓ |
+| 2-stage, decider budget 400, verbose draft | 749 | 1878 | 2 ✓ |
+| **2-stage, decider budget 1000, CONCISE draft** | **157** | 1131 | 2 ✓ |
+
+Findings (honest):
+
+- A **verbose decider** (draft follows the task's "show full reasoning") does
+  NOT reduce opus-tier tokens — the decider's draft text is comparable to
+  stock's answer text, so glm output stays ~750-830 vs stock 717.  The 2-stage
+  value there is purely *epistemic* (the judge independently verifies the draft
+  — on the puzzle it brute-forced all 24 permutations to falsify the draft).
+- A **concise decider** (`TWO_STAGE_DECIDER_CONCISE=1`, the default) tells the
+  decider to emit only the key approach + a tentative answer, and the judge
+  writes the full response.  This drops opus-tier output from **717 → 157
+  (−78%)** while the heavy thinking+writing (1131) moves to the cheaper
+  sonnet tier.  This is the configuration that realises the user's goal
+  ("move expensive thinking off Opus onto Sonnet").
+- The saving is task-dependent: it is largest when the stock model would
+  otherwise think/write heavily on the expensive tier.  For trivial tasks
+  where adaptive thinking stays tiny, 2-stage adds a decider round-trip
+  (extra latency + a small cheap-tier judge call) with little token saving.
+
+Note: here both tiers are free Ollama Cloud models, so "cost" is abstract —
+the numbers prove the *routing architecture* (heavy thinking on the sonnet
+tier at a controlled budget, cheap concise draft on the opus tier), which is
+what matters for a real paid deployment.
+
+### Tool-use loop (live, verified)
+
+Forced a tool call via a scoped `--allowedTools Read` grant: "read
+/tmp/2stage_tooltest/marker.txt and report its contents".  The trace shows
+**two full 2-stage rounds** — round 1 judge emits a `Read` `tool_use` (real SSE
+block forwarded through the proxy), claude-code executes it, feeds the
+`tool_result` back; round 2 judge emits the final answer ("hello-2stage",
+correct).  Streaming survives end-to-end across both rounds.
 
 ## Relationship to the obsolete proxy
 
