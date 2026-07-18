@@ -1,0 +1,236 @@
+#!/usr/bin/env bash
+# cc2stage — Tier-getrennter Claude-Code-Wrapper mit 2-STAGE THINKING.
+#
+# Wie cc-launcher, aber er startet DIE GEPATCHTE 2-stage-Binärdatei
+# (rebuild/out/claude.patched) statt des stock-claude.  Jeder Thinking-Turn
+# wird in zwei Stufen gespalten:
+#
+#   Stage 1 (DECIDER, Opus-Tier)  — non-stream create, kleines Thinking-Budget
+#   Stage 2 (JUDGE,  Sonnet-Tier) — stream create, großes Thinking-Budget +
+#                                   SciMind-5.0-Epistemic-Mandate als System-
+#                                   Präambel.  Emitiert die autoritative
+#                                   finale Antwort + Tool-Calls.  Das echte
+#                                   SSE fließt ungefiltert zu claude-code.
+#
+# Subkommandos:
+#   cc2stage ollama [args...]   # Backend = lokales Ollama (127.0.0.1:11434)
+#   cc2stage nvidia [args...]   # Backend = NVIDIA NIM (integrate.api.nvidia.com)
+#   cc2stage --help | -h        # Hilfe
+#
+# Debug:
+#   cc2stage ollama --debug     # loggt Env-Vars nach stderr + Logfile
+#   Logfile: $XDG_DATA_HOME/cc2stage/debug.log (~/.local/share/cc2stage/debug.log)
+#
+# 2-Stage-Steuerung (Env-Var, je Aufruf):
+#   TWO_STAGE_ENABLED=0 cc2stage ollama        # Passthrough (stock-Verhalten)
+#   TWO_STAGE_STAGE1_TIER=haiku cc2stage ollama # Decider = HAIKU_MODEL
+#   TWO_STAGE_DECIDER_BUDGET=1500 \
+#     TWO_STAGE_JUDGE_BUDGET=12000 cc2stage ollama
+#   TWO_STAGE_DEBUG=1 cc2stage ollama          # Trace -> /tmp/ts.log
+#
+# Tier-Override (wie cc-launcher):
+#   OPUS_MODEL=glm-5.2:cloud SONNET_MODEL=minimax-m3:cloud cc2stage ollama
+set -euo pipefail
+
+# Skript-Verzeichnis ermitteln (funktioniert auch über den ~/.local/bin-Symlink).
+SCRIPT_DIR="$(cd "$(dirname "$(readlink -f "$0")")" && pwd)"
+CLAUDE_TARGET="${CLAUDE_TARGET:-$SCRIPT_DIR/../out/claude.patched}"
+
+if [[ ! -x "$CLAUDE_TARGET" ]]; then
+    echo "cc2stage: gepatchte Binärdatei nicht gefunden: $CLAUDE_TARGET" >&2
+    echo "  Baue sie erst:  cd $SCRIPT_DIR/.. && ./build.sh build" >&2
+    exit 1
+fi
+
+usage() {
+    cat >&2 <<EOF
+cc2stage — Claude-Code-Launcher mit 2-Stage-Thinking (gepatchte Binärdatei)
+
+Usage:
+  cc2stage ollama [claude-args...]   Backend = lokales Ollama, 2-Stage AN
+  cc2stage nvidia [claude-args...]   Backend = NVIDIA NIM,     2-Stage AN
+  cc2stage --help | -h               Diese Hilfe
+
+Tier-Defaults (mode-abhängig, per Env-Var überschreibbar):
+  ollama: Opus=glm-5.2:cloud, Sonnet/Haiku/Subagent=minimax-m3:cloud
+  nvidia: Opus=minimaxai/minimax-m2.7, Rest=minimaxai/minimax-m2.7
+
+2-Stage-Defaults (per Env-Var überschreibbar):
+  TWO_STAGE_ENABLED=1            Master-Schalter (0 = Passthrough)
+  TWO_STAGE_STAGE1_TIER=opus     Decider-Tier -> OPUS_MODEL
+  TWO_STAGE_STAGE2_TIER=sonnet   Judge-Tier   -> SONNET_MODEL
+  TWO_STAGE_DECIDER_BUDGET=2000  Stage-1 Thinking-Budget
+  TWO_STAGE_JUDGE_BUDGET=16000   Stage-2 Thinking-Budget
+  TWO_STAGE_DEBUG=<unset>        Setzen -> Trace nach /tmp/ts.log
+
+Variablen: OPUS_MODEL, SONNET_MODEL, HAIKU_MODEL, SUBAGENT_MODEL,
+           TWO_STAGE_*
+
+Beispiele:
+  cc2stage ollama
+  cc2stage ollama -p 'ultrathink: 2+2?'
+  NVAPI_KEY=nvapi-... cc2stage nvidia
+  TWO_STAGE_ENABLED=0 cc2stage ollama          # stock-Verhalten
+  OPUS_MODEL=glm-5.2:cloud cc2stage ollama
+EOF
+    exit "${1:-0}"
+}
+
+if [[ $# -eq 0 || "${1:-}" == "--help" || "${1:-}" == "-h" ]]; then
+    usage 0
+fi
+
+MODE="$1"; shift
+
+# --debug aus $@ entfernen, BEVOR die Tier-Defaults gesetzt werden.
+CC_DEBUG=0
+NEW_ARGS=()
+for arg in "$@"; do
+    if [[ "$arg" == "--debug" ]]; then
+        CC_DEBUG=1
+    else
+        NEW_ARGS+=("$arg")
+    fi
+done
+set -- "${NEW_ARGS[@]+"${NEW_ARGS[@]}"}"
+
+# --- Debug-Logger (Env-Vars nach stderr + Logfile, Token maskiert) ---------
+CC_DEBUG_LOG="${XDG_DATA_HOME:-$HOME/.local/share}/cc2stage/debug.log"
+cc_debug() {
+    [[ "$CC_DEBUG" -eq 1 ]] || return 0
+    local ts token_log line
+    ts="$(date -Is 2>/dev/null || date)"
+    if [[ -n "${ANTHROPIC_AUTH_TOKEN:-}" ]]; then
+        local t="${ANTHROPIC_AUTH_TOKEN}"
+        if [[ ${#t} -gt 16 ]]; then token_log="${t:0:8}…${t: -4}"
+        else token_log="<set, ${#t} chars>"; fi
+    else token_log="<empty>"; fi
+    line=$(printf '[%s] cc2stage debug\n  mode=%s\n  bin=%s\n  ANTHROPIC_BASE_URL=%s\n  ANTHROPIC_AUTH_TOKEN=%s\n  OPUS_MODEL=%s\n  SONNET_MODEL=%s\n  HAIKU_MODEL=%s\n  SUBAGENT_MODEL=%s\n  TWO_STAGE_ENABLED=%s\n  TWO_STAGE_STAGE1_TIER=%s\n  TWO_STAGE_STAGE2_TIER=%s\n  TWO_STAGE_DECIDER_BUDGET=%s\n  TWO_STAGE_JUDGE_BUDGET=%s\n  TWO_STAGE_DEBUG=%s\n  claude_args=%s' \
+        "$ts" "$MODE" "$CLAUDE_TARGET" \
+        "${ANTHROPIC_BASE_URL:-<unset>}" "$token_log" \
+        "${OPUS_MODEL:-<unset>}" "${SONNET_MODEL:-<unset>}" \
+        "${HAIKU_MODEL:-<unset>}" "${SUBAGENT_MODEL:-<unset>}" \
+        "${TWO_STAGE_ENABLED:-<unset>}" "${TWO_STAGE_STAGE1_TIER:-<unset>}" \
+        "${TWO_STAGE_STAGE2_TIER:-<unset>}" "${TWO_STAGE_DECIDER_BUDGET:-<unset>}" \
+        "${TWO_STAGE_JUDGE_BUDGET:-<unset>}" "${TWO_STAGE_DEBUG:-<unset>}" "$*")
+    printf '%s\n' "$line" >&2
+    local logdir; logdir="$(dirname "$CC_DEBUG_LOG")"
+    if mkdir -p "$logdir" 2>/dev/null; then
+        printf '%s\n' "$line" >> "$CC_DEBUG_LOG" 2>/dev/null || true
+    fi
+}
+
+# --- Mode-spezifische Tier-Defaults (User-Env-Var schlägt Default) ----------
+OPUS_MODEL_OLLAMA="glm-5.2:cloud"
+SONNET_MODEL_OLLAMA="minimax-m3:cloud"
+HAIKU_MODEL_OLLAMA="minimax-m3:cloud"
+SUBAGENT_MODEL_OLLAMA="minimax-m3:cloud"
+
+OPUS_MODEL_NVIDIA="minimaxai/minimax-m2.7"
+SONNET_MODEL_NVIDIA="minimaxai/minimax-m2.7"
+HAIKU_MODEL_NVIDIA="minimaxai/minimax-m2.7"
+SUBAGENT_MODEL_NVIDIA="minimaxai/minimax-m2.7"
+
+case "$MODE" in
+    ollama)
+        export ANTHROPIC_BASE_URL="${ANTHROPIC_BASE_URL:-http://127.0.0.1:11434}"
+        export ANTHROPIC_AUTH_TOKEN="${ANTHROPIC_AUTH_TOKEN:-ollama}"
+        OPUS_MODEL="${OPUS_MODEL:-$OPUS_MODEL_OLLAMA}"
+        SONNET_MODEL="${SONNET_MODEL:-$SONNET_MODEL_OLLAMA}"
+        HAIKU_MODEL="${HAIKU_MODEL:-$HAIKU_MODEL_OLLAMA}"
+        SUBAGENT_MODEL="${SUBAGENT_MODEL:-$SUBAGENT_MODEL_OLLAMA}"
+        ;;
+    nvidia)
+        if [[ -z "${NVAPI_KEY:-}" ]]; then
+            echo "cc2stage nvidia: NVAPI_KEY nicht gesetzt." >&2
+            echo "  Aufruf: NVAPI_KEY=nvapi-... cc2stage nvidia" >&2
+            exit 2
+        fi
+        # Shim starten (Anthropic-/v1/messages -> OpenAI-/v1/chat/completions für NIM).
+        SHIM_BIN="${SHIM_BIN:-/run/media/julian/ML4/claude-model-einstellen/tools/anthropic_openai_shim.py}"
+        SHIM_PORT="${SHIM_PORT:-9876}"
+        SHIM_DATA_DIR="${XDG_DATA_HOME:-$HOME/.local/share}/cc2stage"
+        SHIM_PID_FILE="$SHIM_DATA_DIR/shim.pid"
+        mkdir -p "$SHIM_DATA_DIR"
+        shim_is_up() {
+            for _ in 1 2 3 4 5; do
+                local code
+                code="$(curl -sS -o /dev/null -w '%{http_code}' --max-time 1 \
+                    "http://127.0.0.1:$SHIM_PORT/v1/models" \
+                    -H "Authorization: Bearer $NVAPI_KEY" 2>/dev/null || echo 000)"
+                [[ "$code" == "200" ]] && return 0
+                sleep 0.2
+            done
+            return 1
+        }
+        shim_start_owned=0
+        if ! shim_is_up; then
+            [[ -e "$SHIM_BIN" ]] || { echo "cc2stage nvidia: Shim fehlt: $SHIM_BIN" >&2; exit 3; }
+            if [[ "$CC_DEBUG" -eq 1 && -z "${SHIM_LOG_LEVEL:-}" ]]; then
+                SHIM_LOG_LEVEL_EFFECTIVE="debug"
+            else
+                SHIM_LOG_LEVEL_EFFECTIVE="${SHIM_LOG_LEVEL:-info}"
+            fi
+            echo "cc2stage: starte Shim auf 127.0.0.1:$SHIM_PORT" >&2
+            SHIM_API_KEY="$NVAPI_KEY" SHIM_PORT="$SHIM_PORT" \
+            SHIM_UPSTREAM="${SHIM_UPSTREAM:-https://integrate.api.nvidia.com}" \
+            SHIM_LOG_LEVEL="$SHIM_LOG_LEVEL_EFFECTIVE" \
+                python3 "$SHIM_BIN" >"$SHIM_DATA_DIR/shim.log" 2>&1 &
+            SHIM_PID=$!; echo "$SHIM_PID" > "$SHIM_PID_FILE"; shim_start_owned=1
+            if ! shim_is_up; then
+                echo "cc2stage: Shim nach 1s nicht hoch. Log:" >&2
+                tail -20 "$SHIM_DATA_DIR/shim.log" >&2
+                kill "$SHIM_PID" 2>/dev/null || true; rm -f "$SHIM_PID_FILE"; exit 4
+            fi
+        fi
+        if [[ "$shim_start_owned" -eq 1 ]]; then
+            trap 'kill "${SHIM_PID:-}" 2>/dev/null; rm -f "$SHIM_PID_FILE"' EXIT INT TERM
+        fi
+        export ANTHROPIC_BASE_URL="http://127.0.0.1:$SHIM_PORT"
+        export ANTHROPIC_AUTH_TOKEN="$NVAPI_KEY"
+        OPUS_MODEL="${OPUS_MODEL:-$OPUS_MODEL_NVIDIA}"
+        SONNET_MODEL="${SONNET_MODEL:-$SONNET_MODEL_NVIDIA}"
+        HAIKU_MODEL="${HAIKU_MODEL:-$HAIKU_MODEL_NVIDIA}"
+        SUBAGENT_MODEL="${SUBAGENT_MODEL:-$SUBAGENT_MODEL_NVIDIA}"
+        ;;
+    *)
+        echo "cc2stage: unbekannter Modus '$MODE' (erwartet: ollama oder nvidia)" >&2
+        usage 2
+        ;;
+esac
+
+# --- claude-code Tier-Env --------------------------------------------------
+# WICHTIG: OPUS_MODEL/SONNET_MODEL/HAIKU_MODEL/SUBAGENT_MODEL müssen EXPORTIERT
+# sein — der 2-Stage-Helper liest sie direkt aus process.env (nicht die
+# ANTHROPIC_DEFAULT_*_MODEL-Varianten, die nur stock-claude-code liest).
+export OPUS_MODEL="$OPUS_MODEL"
+export SONNET_MODEL="$SONNET_MODEL"
+export HAIKU_MODEL="$HAIKU_MODEL"
+export SUBAGENT_MODEL="$SUBAGENT_MODEL"
+export ANTHROPIC_DEFAULT_OPUS_MODEL="$OPUS_MODEL"
+export ANTHROPIC_DEFAULT_OPUS_MODEL_NAME="$OPUS_MODEL"
+export ANTHROPIC_DEFAULT_SONNET_MODEL="$SONNET_MODEL"
+export ANTHROPIC_DEFAULT_SONNET_MODEL_NAME="$SONNET_MODEL"
+export ANTHROPIC_DEFAULT_HAIKU_MODEL="$HAIKU_MODEL"
+export ANTHROPIC_DEFAULT_HAIKU_MODEL_NAME="$HAIKU_MODEL"
+export CLAUDE_CODE_SUBAGENT_MODEL="$SUBAGENT_MODEL"
+export CLAUDE_CODE_SUBAGENT_MODEL_NAME="$SUBAGENT_MODEL"
+export ANTHROPIC_API_KEY=""
+export CLAUDE_CODE_ATTRIBUTION_HEADER=0
+
+# --- 2-Stage-Thinking-Env --------------------------------------------------
+export TWO_STAGE_ENABLED="${TWO_STAGE_ENABLED:-1}"
+export TWO_STAGE_STAGE1_TIER="${TWO_STAGE_STAGE1_TIER:-opus}"
+export TWO_STAGE_STAGE2_TIER="${TWO_STAGE_STAGE2_TIER:-sonnet}"
+export TWO_STAGE_DECIDER_BUDGET="${TWO_STAGE_DECIDER_BUDGET:-2000}"
+export TWO_STAGE_JUDGE_BUDGET="${TWO_STAGE_JUDGE_BUDGET:-16000}"
+# TWO_STAGE_DEBUG wird absichtlich NICHT forciert -- nur wenn der User es setzt.
+
+cc_debug "$@"
+
+# Gepatchte Binärdatei direkt starten.  Kein exec-der-Shim-Trap nötig im
+# ollama-Modus; im nvidia-Modus gilt der obige Trap (daher hier kein exec,
+# damit der Trap-Handler beim Beenden den Shim mit-killt).
+"$CLAUDE_TARGET" "$@"
+cc_exit=$?
+exit $cc_exit

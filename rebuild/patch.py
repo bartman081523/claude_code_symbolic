@@ -136,6 +136,9 @@ def patch(base, out_path, patches_file, null_bytecode=False, entry_index=0):
     else:
         raise SystemExit(f"[!] patched source shrank by {-growth} -- not supported")
 
+    out_dir = os.path.dirname(out_path)
+    if out_dir and not os.path.isdir(out_dir):
+        os.makedirs(out_dir, exist_ok=True)
     with open(out_path, "wb") as f:
         f.write(data)
     os.chmod(out_path, 0o755)
