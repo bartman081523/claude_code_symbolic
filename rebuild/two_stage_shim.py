@@ -1,5 +1,11 @@
 #!/usr/bin/env python3
-"""two_stage_shim -- 2-stage epistemic thinking for claude-code, via its
+"""**DEPRECATED / OBSOLETE** -- the 2-stage thinking now lives IN-SOURCE in the
+claude-code binary (see DESIGN.md "The in-source patch", gen_patch.py,
+patch.py, build.sh -> out/claude.patched).  This external proxy is retained
+only as a reference; do not use it.  The in-source version avoids the extra
+hop and the SSE synthesis this shim had to do.
+
+two_stage_shim -- 2-stage epistemic thinking for claude-code, via its
 *normal* thinking flow (NOT a hermes plugin).
 
 PROBLEM

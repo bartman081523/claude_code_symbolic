@@ -8,3 +8,8 @@ extracted/
 # Python
 __pycache__/
 *.pyc
+# stray build logs
+*.log
+*.err
+*.log
+*.err
