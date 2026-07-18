@@ -1,0 +1,7 @@
+[
+  {
+    "needle": "KENsYXVkZSBDb2RlKSR7Q2VlKCl9",
+    "replacement": "KENsNHVkZSBDb2RlKSR7Q2VlKCl9",
+    "note": "POC example: --version banner Claude->Cl4ude (same length)"
+  }
+]

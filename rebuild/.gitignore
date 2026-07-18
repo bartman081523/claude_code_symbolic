@@ -1,0 +1,10 @@
+# Large / regenerable artifacts — fetch via `./build.sh`, do not commit.
+claude.orig
+_pkg/
+*.tgz
+out/
+# Extracted bundle (regenerable via `./build.sh inspect`); 20 MB cli.js + native addons.
+extracted/
+# Python
+__pycache__/
+*.pyc
