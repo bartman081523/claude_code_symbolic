@@ -212,6 +212,132 @@ block forwarded through the proxy), claude-code executes it, feeds the
 `tool_result` back; round 2 judge emits the final answer ("hello-2stage",
 correct).  Streaming survives end-to-end across both rounds.
 
+## v2: judge→decider escalation + role awareness
+
+**Why.** v1's judge was single-shot: it could not tell the decider "I can't judge
+this, your draft is insufficient (too little / too much / missing info), think
+again." v2 makes the judge **self-aware about its own responsibility** and able to
+**escalate back to the decider**, solving the cases where the decider
+under-decides or over-decides. Both roles are now role-aware.
+
+**Architecture (Stream-Inspector, user-approved).** The judge streams real SSE
+as before; a new **inspector** (`__tsInspect`) sits in the Hook-A stream proxy
+and buffers the judge's first text deltas:
+
+- if the judge begins its response with `[ESCALATE]<what the decider must
+  provide>[/ESCALATE]` and nothing else, the inspector **aborts the stream**
+  (the SDK `v7` stream's `finally{ if(!s) t.abort() }` auto-aborts upstream on
+  `break` — no manual teardown), runs a **2nd decider pass** with the judge's
+  request as feedback (`__tsEscalate`), and **re-streams the judge** (recursively,
+  depth-capped);
+- else it releases the buffered events and pipes the rest through 1:1 —
+  **real SSE preserved, only 1× judge in the common case.**
+
+`break`-ing out of the inspector's `for await` is what makes escalation clean:
+the `v7` stream's generator `finally` aborts the upstream HTTP request
+automatically. The non-stream Hook-A path mirrors this with a synchronous loop
+on the resolved `Message` (re-create + retry on marker, strip at cap).
+
+**Depth cap.** `TWO_STAGE_MAX_ESCALATE` (default `2`): judge at depth `d` may
+escalate when `d < MAX`; at `d >= MAX` its instruction forbids the marker and
+demands the best answer with explicit residual-uncertainty flagging. So
+`MAX=2` → escalate at d0, d1; d2 answers. `MAX=0` → no escalation at all
+(judge always answers d0, cap instruction).
+
+**Role-aware prompts.** Decider instruction unchanged (concise first pass; the
+JUDGE will verify). Judge instruction (`__tsJudgeInstr`, depth-aware):
+authoritative final response the user sees alone; apply SciMind epistemic
+humility (verify, falsify, do not trust the draft); **be self-aware about your
+own constraints** — if the draft is insufficient (too little detail, missing
+critical info, OR over-claims beyond what is justified), do NOT fabricate;
+begin the response with exactly `[ESCALATE]<one concise sentence: what the
+decider must provide>[/ESCALATE]` and nothing else. The SciMind preamble
+(`__SCIMIND_PREAMBLE__`) is **unchanged** — escalation lives in the
+instruction, not the mandates.
+
+**Config additions.**
+
+| var | default | meaning |
+|---|---|---|
+| `TWO_STAGE_MAX_ESCALATE` | `2` | max judge→decider escalation rounds (`0` = none) |
+| `TWO_STAGE_ESCALATE_OPEN` / `_CLOSE` | `[ESCALATE]` / `[/ESCALATE]` | markers (swappable via env) |
+
+**Why ASCII markers.** The first cut used `⟨ESCALATE⟩` (U+27E8/27E9). Two
+failure modes made it unreliable: (1) the model **non-deterministically
+normalises** exotic angle brackets to guillemets `‹›` (U+2039/203A); (2) raw
+non-ASCII literals in the patched cli.js source **mojibake'd** (double-encoded)
+under Bun's source parse — `MOlen` read 14 instead of 10, `MO` was `â¨…`. The
+v1 SciMind preamble dodged this via `json.dumps` (`\uXXXX` ASCII escapes).
+v2 defaults to ASCII `[ESCALATE]`/`[/ESCALATE]`: models emit square brackets
+verbatim, the source is pure ASCII. `__tsRe` regex-escapes the markers so
+`__tsEscReq` works with any marker incl. custom ones containing metachars.
+
+**Verified live (direct to Ollama; glm-5.2 decider / minimax-m3 judge).**
+- Normal turn (`2+2?`): 1 decider (glm, non-stream, budget 2000, out=3) + 1 judge
+  (minimax, stream, budget 16000), **no escalation**, real SSE, answer correct.
+  No marker leak.
+- Escalation (`best programming language, no hedging`): the decider over-claimed
+  → judge escalated at d0 ("draft over-claims 'dominates systems programming'…
+  justify or soften") → decider r2 → judge escalated at d1 ("'confined to the
+  web' is factually wrong in 2026") → decider r3 → judge d2 (cap) answered with
+  a 2344-byte reasoned "C" answer. `MAX=2` → exactly 2 escalations, then cap.
+  No marker leak.
+- Depth cap (`MAX=1`): exactly 1 escalation, then the cap judge answers.
+- **Unclear / under-specified questions** (`guess my number 1–100`): the judge is
+  self-aware — it either **escalates** asking the decider for clues/range/parity,
+  OR (when the decider's honest "uniform prior, no info" draft is already
+  epistemically sound) it **answers directly with explicit uncertainty** ("zero
+  distinguishing information… no reasoning can extract signal from a true
+  vacuum… 1% chance"). It does **not** silently fabricate a confident wrong
+  answer. At the cap, whether the uncertainty is surfaced to the user depends on
+  the user's prompt constraints (a "give the exact number, nothing else" prompt
+  suppresses the uncertainty flag; an open prompt surfaces it).
+- `TWO_STAGE_ENABLED=0`: stock passthrough — single request, `tr=false`, no
+  stage split, answer correct.
+- 26/26 Node logic-harness tests (inspector marker detection across chunk
+  boundaries, escalation fires + decider r2 gets feedback, depth cap forbids
+  the directive, normal-turn 1× passthrough, regex/marker helpers).
+
+**Hook B unchanged from v1** (judge-body rewrite only, no escalation) — it is
+the dead `.stream()` path claude-code never uses; documented limitation.
+
+**Note on the `usage_relay.py` debug relay.** It is a buffer-then-send proxy
+(not a true streaming proxy) and uses HTTP keep-alive, so when the inspector
+**aborts** the d0 judge stream mid-response the relay's buffered write hits
+`ConnectionResetError` and (with keep-alive) can poison the follow-up d1
+request on the same socket — producing an empty user output **only when
+relaying through it during an escalation**. This is a relay artifact, not an
+inspector bug: direct-to-Ollama (the real deployment path) works correctly.
+For cost capture during escalation, point at Ollama directly and read
+`/tmp/ts.log`, or make the relay stream + close per request (future cleanup).
+
+## Future (separate plan — symbolic channel + compressed context)
+
+Replace the plain `[ESCALATE]` marker and the natural-language draft with a
+`cognito-construct` symbolic reasoning exchange between decider and judge
+(token-frugal, max freedom), and add a **3rd stage = sonnet tier as the final
+output-translator** that renders the converged symbolic construct into the
+final user-facing answer. Notation at
+`/run/media/julian/ML3/prompts-bartman/prompts/cognito-constructs` (esp.
+`2.6/construct-template.txt`: `℧.think`/`reflect`/`adaptive_update`/`consensus`).
+Escalation becomes `℧.reflect ⇾ escalate(℧, request)`. The marker env vars
+(`ESCALATE_OPEN/CLOSE`) are the swap point. **Carry the marker-reliability
+lesson** (above): use `\uXXXX`-escaped literals or an ASCII sentinel like
+`[CONSTRUCT]`, not raw `⟨⟩`.
+
+**Context compression (the point of going symbolic).** Once the decider↔judge
+loop speaks only symbolic constructs, the conversation **context** can keep only
+the symbolic thinking per turn (not the verbose natural-language reasoning) —
+and symbolic language should compress extraordinarily well (and prompt-cache
+cheaply). Optionally also translate each turn's symbolic construct into a
+**Mermaid graph** and include that in the context too, so the context becomes
+*only symbolic language + optionally Mermaid* (Mermaid optional, per user).
+Implementation shape (later): a context-transform that, for each prior turn,
+replaces the natural-language thinking/reasoning with its symbolic construct
+(+ optional Mermaid) before re-feeding the history — a big context-token win
+for long sessions on top of the per-turn opus-tier saving v1/v2 already
+deliver.
+
 ## Relationship to the obsolete proxy
 
 `two_stage_shim.py` (v0.1) implemented the same 2-stage split as an external

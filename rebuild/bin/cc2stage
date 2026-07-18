@@ -61,6 +61,7 @@ Tier-Defaults (mode-abhängig, per Env-Var überschreibbar):
   TWO_STAGE_STAGE2_TIER=sonnet   Judge-Tier   -> SONNET_MODEL
   TWO_STAGE_DECIDER_BUDGET=2000  Stage-1 Thinking-Budget
   TWO_STAGE_JUDGE_BUDGET=16000   Stage-2 Thinking-Budget
+  TWO_STAGE_MAX_ESCALATE=2       Max Judge->Decider-Eskalationsrunden (0=keine)
   TWO_STAGE_DEBUG=<unset>        Setzen -> Trace nach /tmp/ts.log
 
 Variablen: OPUS_MODEL, SONNET_MODEL, HAIKU_MODEL, SUBAGENT_MODEL,
@@ -224,6 +225,7 @@ export TWO_STAGE_STAGE1_TIER="${TWO_STAGE_STAGE1_TIER:-opus}"
 export TWO_STAGE_STAGE2_TIER="${TWO_STAGE_STAGE2_TIER:-sonnet}"
 export TWO_STAGE_DECIDER_BUDGET="${TWO_STAGE_DECIDER_BUDGET:-2000}"
 export TWO_STAGE_JUDGE_BUDGET="${TWO_STAGE_JUDGE_BUDGET:-16000}"
+export TWO_STAGE_MAX_ESCALATE="${TWO_STAGE_MAX_ESCALATE:-2}"
 # TWO_STAGE_DEBUG wird absichtlich NICHT forciert -- nur wenn der User es setzt.
 
 cc_debug "$@"
