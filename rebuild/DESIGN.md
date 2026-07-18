@@ -311,32 +311,141 @@ inspector bug: direct-to-Ollama (the real deployment path) works correctly.
 For cost capture during escalation, point at Ollama directly and read
 `/tmp/ts.log`, or make the relay stream + close per request (future cleanup).
 
-## Future (separate plan — symbolic channel + compressed context)
+## v3: 3-stage symbolic channel (decider↔judge in ℧ notation + sonnet translator)
 
-Replace the plain `[ESCALATE]` marker and the natural-language draft with a
-`cognito-construct` symbolic reasoning exchange between decider and judge
-(token-frugal, max freedom), and add a **3rd stage = sonnet tier as the final
-output-translator** that renders the converged symbolic construct into the
-final user-facing answer. Notation at
-`/run/media/julian/ML3/prompts-bartman/prompts/cognito-constructs` (esp.
-`2.6/construct-template.txt`: `℧.think`/`reflect`/`adaptive_update`/`consensus`).
-Escalation becomes `℧.reflect ⇾ escalate(℧, request)`. The marker env vars
-(`ESCALATE_OPEN/CLOSE`) are the swap point. **Carry the marker-reliability
-lesson** (above): use `\uXXXX`-escaped literals or an ASCII sentinel like
-`[CONSTRUCT]`, not raw `⟨⟩`.
+**Why.** v2's decider↔judge exchange is natural language — verbose — and the
+judge's full thinking streams verbatim to the user. v3 (opt-in) makes the
+decider↔judge loop speak **only symbolic `℧` cognito-constructs** (notation at
+`…/cognito-constructs/2.6/construct-template.txt`: `℧` brain object, modules
+`think`/`reflect`/`adaptive_update`/`consensus`; escalation =
+`℧.reflect ⇾ escalate(℧, request)`), and adds a **3rd stage = sonnet-tier
+TRANSLATOR** that renders the converged construct into the final NL answer the
+user sees. So: decider (symbolic draft) ↔ judge (symbolic verify/escalate, loop)
+→ translator (sonnet, symbolic→final NL answer, **streamed to the user**).
+Token-frugal per-turn exchange; the heavy `℧` notation lives in the **cached
+system preamble**, not per-turn `messages`.
 
-**Context compression (the point of going symbolic).** Once the decider↔judge
-loop speaks only symbolic constructs, the conversation **context** can keep only
-the symbolic thinking per turn (not the verbose natural-language reasoning) —
-and symbolic language should compress extraordinarily well (and prompt-cache
-cheaply). Optionally also translate each turn's symbolic construct into a
-**Mermaid graph** and include that in the context too, so the context becomes
-*only symbolic language + optionally Mermaid* (Mermaid optional, per user).
-Implementation shape (later): a context-transform that, for each prior turn,
-replaces the natural-language thinking/reasoning with its symbolic construct
-(+ optional Mermaid) before re-feeding the history — a big context-token win
-for long sessions on top of the per-turn opus-tier saving v1/v2 already
-deliver.
+**Gating.** Opt-in via `TWO_STAGE_SYMBOLIC=1`, **default off → v2 unchanged**
+(judge streams directly to the user). Symbolic is the experimental surface.
+
+**Data flow.** All three stages run re-entrant under the existing `__tsInStage1`
+flag (so they take the non-triggered `orig_post` path, no re-entry):
+1. **DECIDER** (opus tier, non-stream, `DECIDER_BUDGET`): concise symbolic
+   `<construct>` draft.
+2. **JUDGE loop** (sonnet tier, non-stream, `JUDGE_BUDGET`, `depth 0..MAX`):
+   if the construct starts with `[ESCALATE]<…>[/ESCALATE]` and `depth<MAX`,
+   extract the inner `℧.reflect ⇾ escalate(℧, request)` via `__tsEscReq` (the
+   existing regex-escaped extractor), re-run the decider with it as feedback,
+   continue; else (converged, or `depth>=MAX` cap; strip the marker at cap) the
+   construct is final.
+3. **TRANSLATOR** (sonnet tier, `OUTPUT_TIER` default sonnet, **stream**,
+   `OUTPUT_BUDGET` default 8000): renders the converged construct into the
+   standalone NL answer (+ any tool calls). Returns
+   `{response, request_id, data: <raw SDK v7 stream>}`.
+
+The judge runs **non-stream** in symbolic mode (full construct captured, loop on
+the resolved message) — this reuses the v2 non-stream loop pattern exactly; the
+streaming inspector (`__tsInspect`) is **untouched** and still serves the
+default v2 path. The translator returns the **raw SDK stream** as `data` (not a
+Proxy) — the engine's `!("controller" in Ti.value)` skip at `cli.js:407773`
+treats it like the stock stream (it has `.controller`), so it's assigned to `qe`
+and iterated by `SSy`. **No Proxy, no `has`-trap, no inspector needed for
+symbolic** — the symbolic path sidesteps the entire class of bug v2 hit.
+On any stage failure the symbolic branch falls back to a stock direct stream
+(`__tsInStage1=true` around the fallback create to prevent re-trigger).
+
+**ASCII sentinels remain the transport swap point.** The symbolic content is
+the `℧` construct, but the loop needs a reliable, cheap byte-stream signal to
+decide "abort and re-run decider." Per the marker-reliability lesson (below):
+raw `⟨⟩` (U+27E8/27E9) is unreliable — the model normalizes it and raw non-ASCII
+in cli.js mojibakes under Bun's parse. v3 keeps `[ESCALATE]`/`[/ESCALATE]`
+(ASCII, env `TWO_STAGE_ESCALATE_OPEN/CLOSE`, unchanged) as the transport signal
+and puts the symbolic construct **inside**. No new detection logic — full reuse
+of `__tsEscReq`/`__tsMOpen`/`__tsMClose`.
+
+**Symbolic system preamble (cached).** The decider/judge/translator `system` =
+SciMind preamble (unchanged) + a compact `℧` notation reference + original
+`body.system`. The notation reference is a Python constant `SYMBOLIC_NOTATION`
+in `gen_patch.py`, spliced into the helper via `json.dumps(ensure_ascii=True)`
+(same pattern as `__SCIMIND_PREAMBLE__`). Additionally, the final `HELPER` is
+run through `ascii_escape_js`, which escapes **every** non-ASCII char to a JS
+`\uXXXX` escape — safe because non-ASCII only ever occurs inside JS string
+literals in this helper (all identifiers are ASCII), and pre-escaped `\uXXXX`
+runs from `json.dumps` pass through untouched (no double-escape). This catches
+the inline `℧`/`⇾` literals in the instruction strings (`__tsSymSystem`,
+`__tsSym*Instr`) that the placeholder splice alone would miss. Verified
+post-build: zero raw non-ASCII bytes around the notation constant; `℧` appears
+as `℧`. **DevMind** (`…/universal/DevMind.txt`) is NOT embedded — it is the
+development *methodology* for this work (evidence-first, spec-before-impl,
+test-first via `test_escalation.js`, surgical changes, DRY reuse), not runtime
+content.
+
+**Helpers added** (in `gen_patch.py` HELPER, all reusing existing primitives
+`__tsMessageText`/`__tsStripMarker`/`__tsEscReq`/`__tsMaxEsc`/`__tsMOpen/Close`/
+`__tsTierModel`/`__tsInStage1`/`__tsLog`/`__tsTrigger`/`__SCIMIND_PREAMBLE__`):
+`__tsSymEnabled`, `__tsOutputTier`, `__tsSymSystem`, `__tsSymDeciderInstr`,
+`__tsSymJudgeInstr` (depth-aware, mirrors `__tsJudgeInstr`), `__tsSymOutputInstr`,
+`async __tsSymDecider`, `__tsSymJudgeBody`, `__tsSymOutputBody`,
+`async __tsSymbolicRun`. Hook A adds one branch at the top of the triggered
+block (`if(__tsSymEnabled()){…return {withResponse…__tsSymbolicRun…}`) before
+the v2 stream branch; both base and beta Hook A get it. **Hook B untouched.**
+
+**Config additions.**
+
+| var | default | meaning |
+|---|---|---|
+| `TWO_STAGE_SYMBOLIC` | unset | `1` = 3-stage symbolic; unset/`0` = v2 (default) |
+| `TWO_STAGE_OUTPUT_TIER` | `sonnet` | translator tier → `SONNET_MODEL` |
+| `TWO_STAGE_OUTPUT_BUDGET` | `8000` | translator thinking budget |
+
+**Verified.** Node harness `test_escalation.js` **69/69** (26 v2 + 43 symbolic:
+`__tsSymEnabled` env read; body builders incl. depth-aware cap/aware
+instructions + tools preserved + `℧`+SciMind system; symbolic normal = 1
+decider/1 judge/1 translator, NL "Answer: 42", no marker/`℧` leak, **`data` is
+the raw SDK stream (`'controller' in data` === true, not a Proxy)**; symbolic
+escalation = decider×2 + judge×2 + translator×1, decider r2 got the feedback;
+symbolic cap `MAX=1`). Live (direct to Ollama; glm-5.2 decider / minimax-m3
+judge+translator): `--version` boots `2.1.214`; **v2 regression** (no
+`TWO_STAGE_SYMBOLIC`) → `[ha-sym]`=0, "Four", 1 decider+1 judge, no escalation
+(default path untouched); **symbolic normal** → `[ha-sym]`, decider (non-stream)
++ judge (non-stream, `esc=false`) + translator (stream), judge emits a real
+`<construct>` (`:: construct(℧, "2+2?") ↦ { ℧.ds ⇾ …}`), user output NL
+("4"/"Paris"/"Four"), **no `℧`/`<construct>` notation leaks to the user**;
+**symbolic tool-use** (scoped `Read`) → "42" across turns; **passthrough
+off-gate** (`ENABLED=0`+`SYMBOLIC=1`) → `__tsTrigger` short-circuits before
+`__tsSymEnabled`, stock "ok", `[ha-sym]`=0; **interactive TUI** (PTY) →
+"Thought for 11s ● Four", no "Spread syntax", no crash, no notation leak.
+Marker reliability: zero raw non-ASCII bytes in the patched source around the
+notation constant (`℧` = `℧`). `cc2stage` exports `TWO_STAGE_OUTPUT_TIER`/
+`_BUDGET` and logs them under `--debug`.
+
+**Live symbolic escalation** is model-compliance-dependent (same as v2's
+documented behavior — a competent judge solving a solvable problem converges
+rather than escalating): across several triggers (underspecified questions,
+over-claims, missing parameters, tiny decider budget) the symbolic judge
+either answered directly with explicit uncertainty or asked the *user* for
+missing info, rather than emitting `[ESCALATE]` to the decider. The escalation
+*mechanism* (decider→judge→decider→judge→translator, feedback passed, depth cap,
+raw-stream return) is deterministically verified by the 4 dedicated node-harness
+tests with a mocked client. The common case (1× judge, no escalation) — which
+the design optimizes for — works live end-to-end.
+
+## Future (separate plan — compressed symbolic context)
+
+The symbolic channel (v3, above) is now shipped. The deferred next step is
+**context compression** — the real point of going symbolic. Once the
+decider↔judge loop speaks only `℧` symbolic constructs, the conversation
+**context** can keep only the symbolic thinking per turn (not the verbose
+natural-language reasoning), and symbolic language should compress
+extraordinarily well (and prompt-cache cheaply). Optionally also translate each
+turn's symbolic construct into a **Mermaid graph** and include that in the
+context too, so the context becomes *only symbolic language + optionally
+Mermaid* (Mermaid optional, per user). Implementation shape: a context-transform
+that, for each prior turn, replaces the natural-language thinking/reasoning with
+its symbolic construct (+ optional Mermaid) before re-feeding the history — a
+big context-token win for long sessions on top of the per-turn opus-tier saving
+v1/v2/v3 already deliver. The v3 symbolic system preamble (`SYMBOLIC_NOTATION`,
+the `℧` reference) is the substrate this transform will build on.
 
 ## Relationship to the obsolete proxy
 

@@ -64,6 +64,12 @@ Tier-Defaults (mode-abhängig, per Env-Var überschreibbar):
   TWO_STAGE_MAX_ESCALATE=2       Max Judge->Decider-Eskalationsrunden (0=keine)
   TWO_STAGE_DEBUG=<unset>        Setzen -> Trace nach /tmp/ts.log
 
+3-Stage Symbolic-Modus (v3, opt-in — decider↔judge in ℧-Notation +
+                          sonnet-Translator rendert die finale Antwort):
+  TWO_STAGE_SYMBOLIC=1           1 = 3-stage symbolic; unset = v2 (Default)
+  TWO_STAGE_OUTPUT_TIER=sonnet   Translator-Tier -> SONNET_MODEL
+  TWO_STAGE_OUTPUT_BUDGET=8000   Translator Thinking-Budget
+
 Variablen: OPUS_MODEL, SONNET_MODEL, HAIKU_MODEL, SUBAGENT_MODEL,
            TWO_STAGE_*
 
@@ -106,14 +112,16 @@ cc_debug() {
         if [[ ${#t} -gt 16 ]]; then token_log="${t:0:8}…${t: -4}"
         else token_log="<set, ${#t} chars>"; fi
     else token_log="<empty>"; fi
-    line=$(printf '[%s] cc2stage debug\n  mode=%s\n  bin=%s\n  ANTHROPIC_BASE_URL=%s\n  ANTHROPIC_AUTH_TOKEN=%s\n  OPUS_MODEL=%s\n  SONNET_MODEL=%s\n  HAIKU_MODEL=%s\n  SUBAGENT_MODEL=%s\n  TWO_STAGE_ENABLED=%s\n  TWO_STAGE_STAGE1_TIER=%s\n  TWO_STAGE_STAGE2_TIER=%s\n  TWO_STAGE_DECIDER_BUDGET=%s\n  TWO_STAGE_JUDGE_BUDGET=%s\n  TWO_STAGE_DEBUG=%s\n  claude_args=%s' \
+    line=$(printf '[%s] cc2stage debug\n  mode=%s\n  bin=%s\n  ANTHROPIC_BASE_URL=%s\n  ANTHROPIC_AUTH_TOKEN=%s\n  OPUS_MODEL=%s\n  SONNET_MODEL=%s\n  HAIKU_MODEL=%s\n  SUBAGENT_MODEL=%s\n  TWO_STAGE_ENABLED=%s\n  TWO_STAGE_STAGE1_TIER=%s\n  TWO_STAGE_STAGE2_TIER=%s\n  TWO_STAGE_DECIDER_BUDGET=%s\n  TWO_STAGE_JUDGE_BUDGET=%s\n  TWO_STAGE_MAX_ESCALATE=%s\n  TWO_STAGE_SYMBOLIC=%s\n  TWO_STAGE_OUTPUT_TIER=%s\n  TWO_STAGE_OUTPUT_BUDGET=%s\n  TWO_STAGE_DEBUG=%s\n  claude_args=%s' \
         "$ts" "$MODE" "$CLAUDE_TARGET" \
         "${ANTHROPIC_BASE_URL:-<unset>}" "$token_log" \
         "${OPUS_MODEL:-<unset>}" "${SONNET_MODEL:-<unset>}" \
         "${HAIKU_MODEL:-<unset>}" "${SUBAGENT_MODEL:-<unset>}" \
         "${TWO_STAGE_ENABLED:-<unset>}" "${TWO_STAGE_STAGE1_TIER:-<unset>}" \
         "${TWO_STAGE_STAGE2_TIER:-<unset>}" "${TWO_STAGE_DECIDER_BUDGET:-<unset>}" \
-        "${TWO_STAGE_JUDGE_BUDGET:-<unset>}" "${TWO_STAGE_DEBUG:-<unset>}" "$*")
+        "${TWO_STAGE_JUDGE_BUDGET:-<unset>}" "${TWO_STAGE_MAX_ESCALATE:-<unset>}" \
+        "${TWO_STAGE_SYMBOLIC:-<unset>}" "${TWO_STAGE_OUTPUT_TIER:-<unset>}" \
+        "${TWO_STAGE_OUTPUT_BUDGET:-<unset>}" "${TWO_STAGE_DEBUG:-<unset>}" "$*")
     printf '%s\n' "$line" >&2
     local logdir; logdir="$(dirname "$CC_DEBUG_LOG")"
     if mkdir -p "$logdir" 2>/dev/null; then
@@ -226,6 +234,10 @@ export TWO_STAGE_STAGE2_TIER="${TWO_STAGE_STAGE2_TIER:-sonnet}"
 export TWO_STAGE_DECIDER_BUDGET="${TWO_STAGE_DECIDER_BUDGET:-2000}"
 export TWO_STAGE_JUDGE_BUDGET="${TWO_STAGE_JUDGE_BUDGET:-16000}"
 export TWO_STAGE_MAX_ESCALATE="${TWO_STAGE_MAX_ESCALATE:-2}"
+# --- 3-Stage Symbolic-Modus (v3, opt-in; Default = v2) ---------------------
+# TWO_STAGE_SYMBOLIC absichtlich NICHT forciert -- nur wenn der User es setzt.
+export TWO_STAGE_OUTPUT_TIER="${TWO_STAGE_OUTPUT_TIER:-sonnet}"
+export TWO_STAGE_OUTPUT_BUDGET="${TWO_STAGE_OUTPUT_BUDGET:-8000}"
 # TWO_STAGE_DEBUG wird absichtlich NICHT forciert -- nur wenn der User es setzt.
 
 cc_debug "$@"

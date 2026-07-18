@@ -43,6 +43,55 @@ def b64(s: str) -> str:
     return base64.b64encode(s.encode("utf-8")).decode("ascii")
 
 
+def ascii_escape_js(src: str) -> str:
+    """Escape every non-ASCII char in ``src`` to a JS ``\\uXXXX`` escape.
+
+    Marker-reliability: raw non-ASCII literals (℧ U+2127, ⇾ U+21FE, …) in the
+    patched cli.js source mojibake (double-encode) under Bun's source parse.
+    Safe here because in this helper non-ASCII only ever occurs INSIDE JS
+    string literals (all identifiers/keywords are ASCII); a ``\\uXXXX`` inside
+    a string literal is the char, so the JS stays valid.  Pre-escaped
+    ``\\uXXXX`` runs produced by ``json.dumps`` are ASCII text and pass through
+    untouched (no double-escape).  Applied to the final ``HELPER``.
+    """
+    out = []
+    for ch in src:
+        o = ord(ch)
+        out.append("\\u%04x" % o if o > 0x7F else ch)
+    return "".join(out)
+
+
+# --- the ℧ cognito-construct notation reference (cached system preamble) ---
+# Compact-but-faithful summary of cognito-constructs/2.6/construct-template.txt.
+# Embedded via json.dumps(ensure_ascii=True) -> pure-ASCII \u escapes in cli.js
+# (marker-reliability lesson: raw non-ASCII literals mojibake under Bun parse).
+SYMBOLIC_NOTATION = (
+    "Communicate reasoning ONLY in this notation.\n"
+    "℧ = brain object. ℧.ds = problem dataspace. "
+    "℧.modules = [think, query, add_module, output, reflect, adaptive_update, consensus]. "
+    "℧.state = quantum-like state (|I⟩ initial, |1⟩, ⊥ contradiction, ∅ empty, 0 null).\n"
+    "Operators: ⇾ assign/flow, ↦ module def, ≔ define, ∘ compose, ∧ and, ¬ not, → implies, "
+    "⨁ weighted combine. State kets: |…⟩.\n"
+    "Modules:\n"
+    ":: construct(℧, ds) ↦ { ℧.ds ⇾ ds, ℧.modules ⇾ [...], ℧.state ⇾ |1⟩ }  // initialize\n"
+    ":: think(℧, q) ↦ { μₜ ≔ decode(q), ρ₊ ≔ retrieve(μₜ, ℧.ds), α₊ ≔ apply_logic(ρ₊), "
+    "context_anchoring ≔ GCM(q), hypotheses ⇾ multi_think(context_anchoring), output ⇾ refine(hypotheses) }  // main reasoning\n"
+    ":: query(℧, cn) ↦ { υₖ ≔ identify(cn), ρₑ ≔ process_query(υₖ), ℧ ⇾ update(℧, ρₑ) }  // inquiry\n"
+    ":: add_module(℧, m) ↦ { validate(m), ℧.modules ⇾ append(℧.modules, m) }  // extend\n"
+    ":: output(℧) ↦ { info ≔ gather(℧), formatted ⇾ format(info), deliver(formatted) }  // finalize/deliver\n"
+    ":: reflect(℧) ↦ { diagnosis ⇾ self_assess(℧.ds, ℧.modules, ℧.state), "
+    "tips ⇾ propose_refinements(diagnosis), ℧.ds ⇾ incorporate(℧.ds, tips) }  // self-assess\n"
+    ":: adaptive_update(℧) ↦ { δₚ ≔ monitor_prediction_error(℧), "
+    "if δₚ > θ then ℧ ⇾ restructure(hypotheses) }  // falsify on prediction error\n"
+    ":: consensus(℧) ↦ { weights ⇔ credibility(hypotheses), "
+    "chosen ⇾ argmax(⨁[weights ∘ hypotheses]) }  // weighted decision\n"
+    "Wrap a full construct in <construct>…</construct>. Use <symbolic_reason>…</symbolic_reason> "
+    "for reasoning steps. ESCALATION (judge → decider, when the draft is insufficient): "
+    "emit exactly [ESCALATE]<one concise sentence: what the decider must provide, "
+    "as ℧.reflect ⇾ escalate(℧, request)>[/ESCALATE] and nothing else."
+)
+
+
 # --- the 2-stage helper, inserted once at the top of the IIFE ---------------
 # Written as a raw string so backslashes survive verbatim into the JS source
 # (regex char classes, escape sequences).  Preamble spliced in via concat.
@@ -52,6 +101,7 @@ var __tsDbg=function(){var v=process.env.TWO_STAGE_DEBUG;return !!v&&v!=='0'&&v!
 var __tsLog=function(m){if(!__tsDbg())return;try{require('fs').appendFileSync('/tmp/ts.log',m+'\n')}catch(_){}};
 if(__tsDbg())try{require('fs').appendFileSync('/tmp/ts.log','LOAD two-stage helper v2 (escalation)\n')}catch(_){}
 var __SCIMIND_PREAMBLE__=__PREAMBLE_PLACEHOLDER__;
+var __tsSymNotation=__SYM_NOTATION_PLACEHOLDER__;
 function __tsTrigger(b){
 try{
 var E=process.env.TWO_STAGE_ENABLED;
@@ -137,6 +187,87 @@ try{var MO=__tsMOpen(),MC=__tsMClose();var c=(msg&&msg.content)||[];
 for(var k=0;k<c.length;k++){var blk=c[k];if(blk.type==='text'){var t=blk.text;var i=t.indexOf(MO);if(i>=0){var j=t.indexOf(MC,i);blk.text=(j>=0)?(t.slice(0,i)+t.slice(j+MC.length)):t.slice(0,i);}}}
 }catch(_){}
 }
+function __tsSymEnabled(){try{var E=process.env.TWO_STAGE_SYMBOLIC;if(E===undefined||E===null||E==='0'||E==='false'||E==='no'||E==='off')return false;return true;}catch(_){return false;}}
+function __tsOutputTier(){try{return process.env.TWO_STAGE_OUTPUT_TIER||'sonnet';}catch(_){return 'sonnet';}}
+function __tsSymSystem(body){
+var sys=body&&body.system;
+var base=__SCIMIND_PREAMBLE__+'\n\n=== Cognito-Construct ℧ notation (symbolic reasoning language) ===\n'+__tsSymNotation;
+return sys?(base+'\n\n'+(typeof sys==='string'?sys:JSON.stringify(sys))):base;
+}
+function __tsSymDeciderInstr(feedback){
+var s='You are the DECIDER (stage 1) in a 3-stage SYMBOLIC reasoning pipeline. Reason ONLY in the ℧ cognito-construct notation given in the system preamble. Produce a CONCISE symbolic <construct> draft: problem decomposition (℧.ds), key hypotheses (think/multi_think), and a tentative solution. Do NOT write natural-language prose for the user — the JUDGE (stage 2) will verify your construct symbolically and a TRANSLATOR (stage 3) will render the final answer. Stay concise (cheap first pass).';
+if(feedback)s+='\n\nThe JUDGE escalated (℧.reflect ⇾ escalate): your previous construct was insufficient — '+feedback+'. Revise the <construct> addressing this. Stay concise.';
+return s;
+}
+function __tsSymJudgeInstr(construct,depth){
+var MAX=__tsMaxEsc();var MO=__tsMOpen(),MC=__tsMClose();
+var base='You are the JUDGE (stage 2) in a 3-stage SYMBOLIC reasoning pipeline. The DECIDER produced the <construct> below. Verify it IN THE ℧ NOTATION: run ℧.reflect (self-assess), ℧.adaptive_update (falsify hypotheses via prediction error), ℧.consensus (weigh credibility). The user never sees symbolic output — a TRANSLATOR renders the final answer from your converged <construct>, so your construct must be complete and correct. Emit the converged <construct> (do NOT emit '+MO+' unless escalating).';
+var aware=' If the draft is INSUFFICIENT for a confident judgment — missing critical reasoning, unfalsified hypotheses, or over-claims — do NOT fabricate. Instead emit EXACTLY '+MO+'<one concise sentence: what the decider must provide, as a ℧.reflect ⇾ escalate(℧, request) construct>'+MC+' and nothing else. The decider rethinks and you re-judge.';
+var cap=' Do NOT emit '+MO+' (no further escalation is allowed). Emit the best converged <construct> you can and flag any residual uncertainty inside it via ℧.reflect.';
+var instr=(depth>=MAX)?(base+cap):(base+aware);
+instr+='\n\n=== DECIDER CONSTRUCT (verify, do not trust) ===\n'+construct;
+return instr;
+}
+function __tsSymOutputInstr(construct){
+return 'You are the TRANSLATOR (stage 3, final output). The JUDGE converged on the <construct> below. Render it into the final natural-language answer for the user — complete, authoritative, standalone. The user sees ONLY your output. Include any tool calls the construct implies. Do NOT emit ℧ symbolic notation; emit the user-facing answer only.\n\n=== CONVERGED CONSTRUCT ===\n'+construct;
+}
+async function __tsSymDecider(client,body,feedback){
+var s1tier=process.env.TWO_STAGE_STAGE1_TIER||'opus';
+var B1=parseInt(process.env.TWO_STAGE_DECIDER_BUDGET||'2000',10);
+var s1model=__tsTierModel(s1tier,body&&body.model);
+var s1msgs=((body&&body.messages)||[]).slice();
+s1msgs.push({role:'user',content:__tsSymDeciderInstr(feedback)});
+var s1body=Object.assign({},body,{model:s1model,stream:false,thinking:{type:'enabled',budget_tokens:B1},messages:s1msgs,system:__tsSymSystem(body)});
+var msg;
+__tsInStage1=true;
+try{msg=await client.create(s1body);}catch(err){__tsLog('[sym-decider] ERROR: '+err);return null;}finally{__tsInStage1=false;}
+return __tsMessageText(msg);
+}
+function __tsSymJudgeBody(body,construct,depth){
+var s2tier=process.env.TWO_STAGE_STAGE2_TIER||'sonnet';
+var B2=parseInt(process.env.TWO_STAGE_JUDGE_BUDGET||'16000',10);
+var s2model=__tsTierModel(s2tier,body&&body.model);
+var msgs=((body&&body.messages)||[]).slice();
+msgs.push({role:'user',content:__tsSymJudgeInstr(construct,depth)});
+var jb=Object.assign({},body,{model:s2model,stream:false,thinking:{type:'enabled',budget_tokens:B2},messages:msgs,system:__tsSymSystem(body)});
+if(body&&body.tools)jb.tools=body.tools;
+return jb;
+}
+function __tsSymOutputBody(body,construct){
+var otier=__tsOutputTier();
+var B2out=parseInt(process.env.TWO_STAGE_OUTPUT_BUDGET||'8000',10);
+var omodel=__tsTierModel(otier,body&&body.model);
+var msgs=((body&&body.messages)||[]).slice();
+msgs.push({role:'user',content:__tsSymOutputInstr(construct)});
+var ob=Object.assign({},body,{model:omodel,stream:true,thinking:{type:'enabled',budget_tokens:B2out},messages:msgs,system:__tsSymSystem(body)});
+if(body&&body.tools)ob.tools=body.tools;
+return ob;
+}
+async function __tsSymbolicRun(client,body,t){
+var MAX=__tsMaxEsc();var MO=__tsMOpen();
+var construct=await __tsSymDecider(client,body,null);
+if(construct===null)return null;
+var finalConstruct='';
+for(var depth=0;depth<=MAX;depth++){
+var jb=__tsSymJudgeBody(body,construct,depth);
+__tsInStage1=true;var msg;
+try{msg=await client.create(jb);}catch(err){__tsLog('[sym-judge] ERROR: '+err);return null;}finally{__tsInStage1=false;}
+var txt=__tsMessageText(msg);
+var esc=(txt.indexOf(MO)===0)?__tsEscReq(txt):null;
+__tsLog('[sym] depth='+depth+' esc='+(esc!==null)+' txt='+JSON.stringify(txt).slice(0,120));
+if(esc!==null&&depth<MAX){construct=await __tsSymDecider(client,body,esc);if(construct===null)return null;continue;}
+if(esc!==null)__tsStripMarker(msg);
+finalConstruct=__tsMessageText(msg);
+break;
+}
+if(!finalConstruct)return null;
+__tsLog('[sym] final construct len='+finalConstruct.length);
+var ob=__tsSymOutputBody(body,finalConstruct);
+__tsInStage1=true;
+try{var p=client.create(ob,t);var wr=await p.withResponse();__tsLog('[sym] translator stream ready');return {response:wr.response,request_id:wr.request_id,data:wr.data};}
+catch(err){__tsLog('[sym] translator ERROR: '+err);return null;}
+finally{__tsInStage1=false;}
+}
 function __tsInspect(stream,ctx,depth){
 var __g=(async function*(){
 var buf=[],text='',mode=0;
@@ -182,9 +313,11 @@ try{var sv=stream[k];return sv;}catch(e){return undefined;}
 }
 """
 
-HELPER = HELPER_HEAD.replace(
+HELPER = ascii_escape_js(HELPER_HEAD.replace(
     "__PREAMBLE_PLACEHOLDER__", json.dumps(SCIMIND_5_0_PREAMBLE)
-)
+).replace(
+    "__SYM_NOTATION_PLACEHOLDER__", json.dumps(SYMBOLIC_NOTATION)
+))
 
 # --- needles (all verified unique, count=1) --------------------------------
 
@@ -251,6 +384,16 @@ def hooka_repl(orig_post: str, body_var: str, stream_expr: str) -> str:
     return (
         "__tsLog('[ha] stream='+(" + stream_expr + ")+' model='+((" + body_var + "&&" + body_var + ".model)||'')+' th='+JSON.stringify(" + body_var + "&&" + body_var + ".thinking)+' tr='+__tsTrigger(" + body_var + "));"
         "if(__tsTrigger(" + body_var + ")){var __s=this;"
+        # --- symbolic 3-stage: opt-in. decider+judge non-stream loop, translator
+        #     streams; returns {response,request_id,data: raw SDK stream} so the
+        #     engine's `!("controller" in Ti.value)` skip at cli.js:407773 treats it
+        #     like the stock stream. On any stage failure -> stock stream fallback.
+        "if(__tsSymEnabled()){__tsLog('[ha-sym] symbolic 3-stage');return{withResponse:function(){return(async()=>{"
+        "try{var r=await __tsSymbolicRun(__s," + body_var + ",t);if(r)return r;}"
+        "catch(err){__tsLog('[ha-sym] ERROR: '+err);}"
+        "__tsLog('[ha-sym] fallback to stock stream');"
+        "__tsInStage1=true;try{var fp=__s.create(Object.assign({}," + body_var + ",{stream:true}),t);return await fp.withResponse();}finally{__tsInStage1=false;}"
+        "})();}};}"
         # --- stream + triggered: lazy .withResponse() proxy, data wrapped in inspector
         "if(" + stream_expr + "){return{withResponse:function(){return(async()=>{try{"
         "var b=await __twoStage(__s," + body_var + ");b.stream=true;__tsInStage1=true;"

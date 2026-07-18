@@ -200,6 +200,130 @@ const body = { model: 'opus-mock', thinking: { type: 'enabled', budget_tokens: 2
   ok('custom marker respected by __tsEscReq', H.__tsEscReq('[ESC]need Y[/ESC]') === 'need Y');
   delete process.env.TWO_STAGE_ESCALATE_OPEN; delete process.env.TWO_STAGE_ESCALATE_CLOSE;
 
+  // === SYMBOLIC 3-STAGE TESTS =============================================
+  console.log('\nTEST 5: __tsSymEnabled env read');
+  delete process.env.TWO_STAGE_SYMBOLIC;
+  ok('sym disabled by default', H.__tsSymEnabled() === false);
+  process.env.TWO_STAGE_SYMBOLIC = '0'; ok('sym disabled on 0', H.__tsSymEnabled() === false);
+  process.env.TWO_STAGE_SYMBOLIC = 'false'; ok('sym disabled on false', H.__tsSymEnabled() === false);
+  process.env.TWO_STAGE_SYMBOLIC = '1'; ok('sym enabled on 1', H.__tsSymEnabled() === true);
+
+  console.log('TEST 6: symbolic body builders');
+  const sbody = { model: 'opus-mock', thinking: { type: 'enabled', budget_tokens: 2000 },
+    messages: [{ role: 'user', content: 'solve' }], tools: [{ name: 'Read' }], system: 'SYS' };
+  const jbSym = H.__tsSymJudgeBody(sbody, '<construct>draft</construct>', 0);
+  ok('sym judge body model is sonnet', jbSym.model === 'sonnet-mock');
+  ok('sym judge body preserves tools', jbSym.tools && jbSym.tools.length === 1);
+  ok('sym judge body non-stream', jbSym.stream === false);
+  ok('sym judge system has ℧ notation', /℧/.test(jbSym.system));
+  ok('sym judge system has SciMind', /epistemic|humility|falsif/i.test(jbSym.system) || jbSym.system.length > 200);
+  ok('sym judge instruction has ESCALATE directive (depth 0)', /\[ESCALATE\]/.test(jbSym.messages[jbSym.messages.length - 1].content));
+  const jbSymCap = H.__tsSymJudgeBody(sbody, 'draft', 2);
+  ok('sym cap instruction forbids ESCALATE', !/emit EXACTLY \[ESCALATE\]/.test(jbSymCap.messages[jbSymCap.messages.length - 1].content));
+  ok('sym cap instruction says no further escalation', /no further escalation is allowed/.test(jbSymCap.messages[jbSymCap.messages.length - 1].content));
+  const obSym = H.__tsSymOutputBody(sbody, '<construct>final</construct>');
+  ok('sym output body model is sonnet', obSym.model === 'sonnet-mock');
+  ok('sym output body is stream', obSym.stream === true);
+  ok('sym output body preserves tools', obSym.tools && obSym.tools.length === 1);
+  ok('sym output instruction says TRANSLATOR', /TRANSLATOR/.test(obSym.messages[obSym.messages.length - 1].content));
+
+  // --- symbolic mock client ---
+  let symDeciderCalls = 0, symDeciderFeedbacks = [], symJudgeCalls = 0, symTranslatorCalls = 0;
+  let symJudgeDepths = [], symTranslatorBody = null;
+  function makeSymClient({ escalateFirst = true } = {}) {
+    return {
+      create(b, o) {
+        const lastUser = [...(b.messages || [])].reverse().find(m => m.role === 'user');
+        const instr = (lastUser && lastUser.content) || '';
+        if (b.stream) {
+          // TRANSLATOR
+          symTranslatorCalls++; symTranslatorBody = b;
+          const events = [msgStart(), blkStart(0, 'thinking'), thinkingDelta(0, 'rendering'), blkStop(0),
+            blkStart(1, 'text'), textDelta(1, 'Answer: 42'), blkStop(1), msgDelta(5), msgStop()];
+          const data = asyncIter(events); data.controller = {};  // mimic SDK v7 stream
+          return { withResponse: async () => ({ response: { status: 200 }, request_id: 'rid-tr', data }) };
+        }
+        if (instr.startsWith('You are the DECIDER')) {
+          symDeciderCalls++;
+          if (/JUDGE escalated/.test(instr)) symDeciderFeedbacks.push(instr);
+          return Promise.resolve({ content: [{ type: 'text', text: '<construct>℧.think hypotheses answer=42 draft</construct>' }] });
+        }
+        if (instr.startsWith('You are the JUDGE')) {
+          symJudgeCalls++;
+          const depth = (symJudgeCalls === 1 && escalateFirst);
+          symJudgeDepths.push(depth ? 'esc' : 'conv');
+          if (depth) {
+            return Promise.resolve({ content: [{ type: 'text', text: '[ESCALATE]℧.reflect ⇾ escalate(℧, need exact constraint values)[/ESCALATE]' }] });
+          }
+          return Promise.resolve({ content: [{ type: 'text', text: '<construct>℧.consensus chosen=42 verified</construct>' }] });
+        }
+        return Promise.resolve({ content: [{ type: 'text', text: '' }] });
+      },
+    };
+  }
+  async function collectText(stream) {
+    const out = [];
+    for await (const e of stream) out.push(e);
+    return out.filter(e => e.type === 'content_block_delta' && e.delta && e.delta.type === 'text_delta').map(e => e.delta.text).join('');
+  }
+
+  console.log('TEST 7: symbolic normal (no escalation) -> 1 decider, 1 judge, 1 translator, NL output');
+  process.env.TWO_STAGE_MAX_ESCALATE = '2';
+  symDeciderCalls = 0; symDeciderFeedbacks = []; symJudgeCalls = 0; symTranslatorCalls = 0; symJudgeDepths = [];
+  const c7 = makeSymClient({ escalateFirst: false });
+  const r7 = await H.__tsSymbolicRun(c7, sbody, {});
+  ok('sym normal: returns a result object', r7 && r7.response && r7.request_id && r7.data);
+  ok('sym normal: data is raw stream (controller in data)', !!r7.data && ('controller' in r7.data));
+  const t7 = await collectText(r7.data);
+  console.log('   translator text:', JSON.stringify(t7));
+  ok('sym normal: decider called once', symDeciderCalls === 1);
+  ok('sym normal: judge called once', symJudgeCalls === 1);
+  ok('sym normal: translator called once', symTranslatorCalls === 1);
+  ok('sym normal: translator output is NL "Answer: 42"', /Answer: 42/.test(t7));
+  ok('sym normal: no ESCALATE marker leaked to user', !/\[ESCALATE\]/.test(t7));
+  ok('sym normal: no ℧ notation leaked to user', !/℧\.|<construct>/.test(t7));
+  ok('sym normal: translator body used ℧ system', symTranslatorBody && /℧/.test(symTranslatorBody.system));
+
+  console.log('TEST 8: symbolic escalation (d0 escalate, d1 converge, translator)');
+  symDeciderCalls = 0; symDeciderFeedbacks = []; symJudgeCalls = 0; symTranslatorCalls = 0; symJudgeDepths = [];
+  const c8 = makeSymClient({ escalateFirst: true });
+  const r8 = await H.__tsSymbolicRun(c8, sbody, {});
+  const t8 = await collectText(r8.data);
+  console.log('   translator text:', JSON.stringify(t8));
+  ok('sym esc: decider called twice (r1 + r2)', symDeciderCalls === 2);
+  ok('sym esc: decider r2 got feedback', symDeciderFeedbacks.length === 1 && /JUDGE escalated/.test(symDeciderFeedbacks[0]));
+  ok('sym esc: judge called twice (escalate then converge)', symJudgeCalls === 2);
+  ok('sym esc: translator called once', symTranslatorCalls === 1);
+  ok('sym esc: judge round 1 was escalate', symJudgeDepths[0] === 'esc');
+  ok('sym esc: judge round 2 converged', symJudgeDepths[1] === 'conv');
+  ok('sym esc: no marker in translator output', !/\[ESCALATE\]/.test(t8));
+  ok('sym esc: translator output is the answer', /Answer: 42/.test(t8));
+
+  console.log('TEST 9: symbolic cap (MAX=1) -> exactly one escalation, then cap converges');
+  process.env.TWO_STAGE_MAX_ESCALATE = '1';
+  symDeciderCalls = 0; symDeciderFeedbacks = []; symJudgeCalls = 0; symTranslatorCalls = 0; symJudgeDepths = [];
+  const c9 = makeSymClient({ escalateFirst: true });  // d0 judge escalates; d1 (cap) converges
+  const r9 = await H.__tsSymbolicRun(c9, sbody, {});
+  const t9 = await collectText(r9.data);
+  ok('sym cap: decider called twice', symDeciderCalls === 2);
+  ok('sym cap: judge called twice', symJudgeCalls === 2);
+  ok('sym cap: translator called once', symTranslatorCalls === 1);
+  ok('sym cap: no marker in translator output', !/\[ESCALATE\]/.test(t9));
+  ok('sym cap: translator output is the answer', /Answer: 42/.test(t9));
+  // cap instruction (depth >= MAX=1) forbids ESCALATE
+  const jbCap1 = H.__tsSymJudgeBody(sbody, 'draft', 1);
+  ok('sym cap d1 instruction forbids ESCALATE directive', !/emit EXACTLY \[ESCALATE\]/.test(jbCap1.messages[jbCap1.messages.length - 1].content));
+  const jbAware0 = H.__tsSymJudgeBody(sbody, 'draft', 0);
+  ok('sym aware d0 instruction has ESCALATE directive', /emit EXACTLY \[ESCALATE\]/.test(jbAware0.messages[jbAware0.messages.length - 1].content));
+  process.env.TWO_STAGE_MAX_ESCALATE = '2';
+
+  console.log('TEST 10: __tsSymbolicRun returns {response,request_id,data} shape (raw stream)');
+  const c10 = makeSymClient({ escalateFirst: false });
+  const r10 = await H.__tsSymbolicRun(c10, sbody, {});
+  ok('sym shape: has response', r10.response && r10.response.status === 200);
+  ok('sym shape: has request_id', typeof r10.request_id === 'string');
+  ok('sym shape: data is the raw SDK stream (not a Proxy wrapper)', 'controller' in r10.data && typeof r10.data[Symbol.asyncIterator] === 'function');
+
   console.log(`\nRESULT: ${pass} pass, ${fail} fail`);
   process.exit(fail ? 1 : 0);
 })().catch(e => { console.error('HARNESS ERROR:', e); process.exit(2); });
