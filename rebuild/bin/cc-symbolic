@@ -1,0 +1,261 @@
+#!/usr/bin/env bash
+# cc-symbolic — Claude-Code-Launcher für die SYMBOLIC-ONLY-Binärdatei
+# (rebuild/out/claude.patched, Branch `symbolic-only`).
+#
+# Startet die gepatchte Binärdatei, in der der 3-stage SYMBOLIC-reasoning-
+# Kanal eingebaut ist (DECIDER -> JUDGE -> TRANSLATOR, ℧-Notation).  Der Kanal
+# ist SURGICAL opt-in via `symbolic_thinking=1`; ohne env ist die Binärdatei
+# byte-identisch zu stock.  Dieser Launcher setzt die env per Default auf 1.
+#
+# Kanonischer Default (siehe memory symbolic-path-canonical-default):
+#   - thinking:{type:'disabled'} auf allen 3 Stages  (symbolic_thinking_mode=disabled)
+#   - thinking-block-fallback in der Text-Extraktion  (in Binärdatei eingebaut)
+#   - Tools aus DECIDER + JUDGE gestrip            (in Binärdatei eingebaut)
+#   - TRANSLATOR behält tools                      (in Binärdatei eingebaut)
+#
+# Subkommandos (Backend = wo /v1/messages ankommt):
+#   cc-symbolic ollama     [args...]   Backend = lokales Ollama (127.0.0.1:11434)
+#                                        Modelle = minimax-m3:cloud
+#   cc-symbolic anthropic  [args...]   Backend = ANTHROPIC ORIGINAL-API
+#                                        (https://api.anthropic.com, echter Key)
+#                                        Modelle = claude-opus-4-8 / claude-sonnet-5
+#                                        symbolic-reasoning-Patch läuft GEGEN die
+#                                        echte Anthropic-API (honoriert thinking).
+#   cc-symbolic mock       [args...]   Backend = lokaler Mock-Server der
+#                                        Original-API (zum Testen des Patches
+#                                        ohne echten Key).  Startet den Mock
+#                                        automatisch auf einem freien Port.
+#   cc-symbolic --help | -h            Hilfe
+#
+# Debug:
+#   cc-symbolic ollama --debug        env nach stderr + Logfile
+#   symbolic_thinking_debug=1 cc-symbolic ollama   stage-trace -> /tmp/ts.log
+#   Logfile: $XDG_DATA_HOME/cc-symbolic/debug.log
+set -euo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "$(readlink -f "$0")")" && pwd)"
+CLAUDE_TARGET="${CLAUDE_TARGET:-$SCRIPT_DIR/../out/claude.patched}"
+MOCK_BIN="${MOCK_BIN:-$SCRIPT_DIR/../tools/mock_anthropic_api.py}"
+
+if [[ ! -x "$CLAUDE_TARGET" ]]; then
+    echo "cc-symbolic: gepatchte Binärdatei nicht gefunden: $CLAUDE_TARGET" >&2
+    echo "  Baue sie erst:  cd $SCRIPT_DIR/.. && python3 gen_patch.py && python3 patch.py claude.orig out/claude.patched patches.json" >&2
+    exit 1
+fi
+
+usage() {
+    cat >&2 <<'EOF'
+cc-symbolic — Claude-Code-Launcher für die symbolic-only-Binärdatei (3-stage
+℧ symbolic reasoning, surgical opt-in via symbolic_thinking=1).
+
+Usage:
+  cc-symbolic ollama     [claude-args...]   Backend = lokales Ollama, symbolic AN
+  cc-symbolic anthropic  [claude-args...]   Backend = ANTHROPIC ORIGINAL-API
+  cc-symbolic mock       [claude-args...]   Backend = lokaler Mock (zum Testen)
+  cc-symbolic --help | -h                   Diese Hilfe
+
+Tier-Defaults (mode-abhängig, per Env-Var überschreibbar):
+  ollama:    Opus=Sonnet=Haiku=Subagent = minimax-m3:cloud
+  anthropic: Opus=claude-opus-4-8, Sonnet=Haiku=Subagent = claude-sonnet-5
+  mock:      Opus=Sonnet=Haiku=Subagent = mock-model
+
+Symbolic-Defaults (per Env-Var überschreibbar; alle `symbolic_thinking_*`):
+  symbolic_thinking=1               Master-Schalter (Launcher forciert AN)
+  symbolic_thinking_mode=disabled   thinking:{type:'disabled} auf allen Stages
+                                     (Sweet-Spot-Default; = deep-1: enabled+budget;
+                                      = none: Feld weglassen)
+  symbolic_thinking_decider_tier=opus   -> OPUS_MODEL
+  symbolic_thinking_judge_tier=sonnet   -> SONNET_MODEL
+  symbolic_thinking_output_tier=sonnet -> SONNET_MODEL
+  symbolic_thinking_decider_budget=2000
+  symbolic_thinking_judge_budget=16000
+  symbolic_thinking_output_budget=8000
+  symbolic_thinking_max_escalate=0      Judge->Decider-Runden (0=Single-Pass)
+  symbolic_thinking_debug=<unset>        Setzen -> Stage-Trace nach /tmp/ts.log
+  symbolic_thinking_deep=<unset>         1 -> thinking:{enabled,budget} (langsam
+                                         auf Ollama-Cloud; auf echter Anthropic-API
+                                         honoriert -> gebunden+schnell)
+
+WICHTIG: `anthropic`-Modus = symbolic-reasoning-Patch gegen die ECHTE Anthropic-
+API.  Anthropic honoriert thinking:{disabled} UND budget_tokens -> gebundene,
+schnelle Stages MIT schluendigem Modell (im Gegensatz zur Ollama-Cloud, die beides
+ignoriert).  Braucht ANTHROPIC_API_KEY (oder ANTHROPIC_AUTH_TOKEN).
+
+Beispiele:
+  cc-symbolic ollama
+  cc-symbolic ollama -p 'ultrathink: 2+2? one word.'
+  ANTHROPIC_API_KEY=sk-ant-... cc-symbolic anthropic -p 'solve: 2+2'
+  cc-symbolic mock -p 'write a fn that sums a list'   # Patch-Test ohne Key
+  symbolic_thinking_debug=1 cc-symbolic ollama -p '...'
+EOF
+    exit "${1:-0}"
+}
+
+if [[ $# -eq 0 || "${1:-}" == "--help" || "${1:-}" == "-h" ]]; then
+    usage 0
+fi
+
+MODE="$1"; shift
+
+# --debug aus $@ entfernen (unser Debug-Flag, nicht claude-codes).
+CC_DEBUG=0
+NEW_ARGS=()
+for arg in "$@"; do
+    if [[ "$arg" == "--debug" ]]; then CC_DEBUG=1
+    else NEW_ARGS+=("$arg"); fi
+done
+set -- "${NEW_ARGS[@]+"${NEW_ARGS[@]}"}"
+
+# --- Debug-Logger ---------------------------------------------------------
+CC_DEBUG_LOG="${XDG_DATA_HOME:-$HOME/.local/share}/cc-symbolic/debug.log"
+cc_debug() {
+    [[ "$CC_DEBUG" -eq 1 ]] || return 0
+    local ts token_log line
+    ts="$(date -Is 2>/dev/null || date)"
+    if [[ -n "${ANTHROPIC_AUTH_TOKEN:-}${ANTHROPIC_API_KEY:-}" ]]; then
+        local t="${ANTHROPIC_AUTH_TOKEN:-$ANTHROPIC_API_KEY}"
+        if [[ ${#t} -gt 16 ]]; then token_log="${t:0:8}…${t: -4}"
+        else token_log="<set, ${#t} chars>"; fi
+    else token_log="<empty>"; fi
+    line=$(printf '[%s] cc-symbolic debug\n  mode=%s\n  bin=%s\n  ANTHROPIC_BASE_URL=%s\n  AUTH=%s\n  OPUS_MODEL=%s\n  SONNET_MODEL=%s\n  HAIKU_MODEL=%s\n  SUBAGENT_MODEL=%s\n  symbolic_thinking=%s\n  symbolic_thinking_mode=%s\n  symbolic_thinking_deep=%s\n  symbolic_thinking_decider_tier=%s\n  symbolic_thinking_judge_tier=%s\n  symbolic_thinking_output_tier=%s\n  symbolic_thinking_decider_budget=%s\n  symbolic_thinking_judge_budget=%s\n  symbolic_thinking_output_budget=%s\n  symbolic_thinking_max_escalate=%s\n  symbolic_thinking_debug=%s\n  claude_args=%s' \
+        "$ts" "$MODE" "$CLAUDE_TARGET" \
+        "${ANTHROPIC_BASE_URL:-<unset>}" "$token_log" \
+        "${OPUS_MODEL:-<unset>}" "${SONNET_MODEL:-<unset>}" \
+        "${HAIKU_MODEL:-<unset>}" "${SUBAGENT_MODEL:-<unset>}" \
+        "${symbolic_thinking:-<unset>}" "${symbolic_thinking_mode:-<unset>}" \
+        "${symbolic_thinking_deep:-<unset>}" \
+        "${symbolic_thinking_decider_tier:-<unset>}" \
+        "${symbolic_thinking_judge_tier:-<unset>}" \
+        "${symbolic_thinking_output_tier:-<unset>}" \
+        "${symbolic_thinking_decider_budget:-<unset>}" \
+        "${symbolic_thinking_judge_budget:-<unset>}" \
+        "${symbolic_thinking_output_budget:-<unset>}" \
+        "${symbolic_thinking_max_escalate:-<unset>}" \
+        "${symbolic_thinking_debug:-<unset>}" "$*")
+    printf '%s\n' "$line" >&2
+    local logdir; logdir="$(dirname "$CC_DEBUG_LOG")"
+    if mkdir -p "$logdir" 2>/dev/null; then
+        printf '%s\n' "$line" >> "$CC_DEBUG_LOG" 2>/dev/null || true
+    fi
+}
+
+# --- Mode-spezifische Backend- + Tier-Defaults ----------------------------
+OPUS_MODEL_OLLAMA="minimax-m3:cloud"
+SONNET_MODEL_OLLAMA="minimax-m3:cloud"
+HAIKU_MODEL_OLLAMA="minimax-m3:cloud"
+SUBAGENT_MODEL_OLLAMA="minimax-m3:cloud"
+
+OPUS_MODEL_ANTHROPIC="claude-opus-4-8"
+SONNET_MODEL_ANTHROPIC="claude-sonnet-5"
+HAIKU_MODEL_ANTHROPIC="claude-sonnet-5"
+SUBAGENT_MODEL_ANTHROPIC="claude-sonnet-5"
+
+OPUS_MODEL_MOCK="mock-model"
+SONNET_MODEL_MOCK="mock-model"
+HAIKU_MODEL_MOCK="mock-model"
+SUBAGENT_MODEL_MOCK="mock-model"
+
+MOCK_PID=""
+mock_cleanup() { [[ -n "$MOCK_PID" ]] && kill "$MOCK_PID" 2>/dev/null || true; }
+
+case "$MODE" in
+    ollama)
+        export ANTHROPIC_BASE_URL="${ANTHROPIC_BASE_URL:-http://127.0.0.1:11434}"
+        export ANTHROPIC_AUTH_TOKEN="${ANTHROPIC_AUTH_TOKEN:-ollama}"
+        OPUS_MODEL="${OPUS_MODEL:-$OPUS_MODEL_OLLAMA}"
+        SONNET_MODEL="${SONNET_MODEL:-$SONNET_MODEL_OLLAMA}"
+        HAIKU_MODEL="${HAIKU_MODEL:-$HAIKU_MODEL_OLLAMA}"
+        SUBAGENT_MODEL="${SUBAGENT_MODEL:-$SUBAGENT_MODEL_OLLAMA}"
+        ;;
+    anthropic)
+        # Echte Anthropic-API.  Key via ANTHROPIC_API_KEY oder ANTHROPIC_AUTH_TOKEN.
+        if [[ -z "${ANTHROPIC_API_KEY:-}" && -z "${ANTHROPIC_AUTH_TOKEN:-}" ]]; then
+            echo "cc-symbolic anthropic: kein Key.  Setze ANTHROPIC_API_KEY (oder ANTHROPIC_AUTH_TOKEN)." >&2
+            echo "  Aufruf: ANTHROPIC_API_KEY=sk-ant-... cc-symbolic anthropic" >&2
+            exit 2
+        fi
+        export ANTHROPIC_BASE_URL="${ANTHROPIC_BASE_URL:-https://api.anthropic.com}"
+        # claude-code nutzt ANTHROPIC_AUTH_TOKEN als bearer; echtes Anthropic will
+        # x-api-key.  Beide setzen; die Binärdatei sendet x-api-key wenn
+        # ANTHROPIC_API_KEY gesetzt, sonst bearer.
+        [[ -n "${ANTHROPIC_API_KEY:-}" ]] || export ANTHROPIC_API_KEY="${ANTHROPIC_AUTH_TOKEN:-}"
+        OPUS_MODEL="${OPUS_MODEL:-$OPUS_MODEL_ANTHROPIC}"
+        SONNET_MODEL="${SONNET_MODEL:-$SONNET_MODEL_ANTHROPIC}"
+        HAIKU_MODEL="${HAIKU_MODEL:-$HAIKU_MODEL_ANTHROPIC}"
+        SUBAGENT_MODEL="${SUBAGENT_MODEL:-$SUBAGENT_MODEL_ANTHROPIC}"
+        ;;
+    mock)
+        [[ -e "$MOCK_BIN" ]] || { echo "cc-symbolic mock: Mock fehlt: $MOCK_BIN" >&2; exit 3; }
+        MOCK_PORT="${MOCK_PORT:-8765}"
+        MOCK_LOG="${XDG_DATA_HOME:-$HOME/.local/share}/cc-symbolic/mock.log"
+        mkdir -p "$(dirname "$MOCK_LOG")"
+        # prüfen ob schon läuft
+        if ! curl -sS -o /dev/null -w '%{http_code}' --max-time 1 \
+             "http://127.0.0.1:$MOCK_PORT/v1/messages" -X POST \
+             -H 'content-type: application/json' --data '{"model":"mock-model","max_tokens":1,"messages":[{"role":"user","content":"ping"}]}' 2>/dev/null \
+             | grep -qE '200|400|401'; then
+            echo "cc-symbolic: starte Mock-Server auf 127.0.0.1:$MOCK_PORT" >&2
+            MOCK_PORT="$MOCK_PORT" python3 "$MOCK_BIN" >"$MOCK_LOG" 2>&1 &
+            MOCK_PID=$!; trap mock_cleanup EXIT INT TERM
+            for _ in 1 2 3 4 5 6 7 8 9 10; do
+                curl -sS -o /dev/null --max-time 1 "http://127.0.0.1:$MOCK_PORT/v1/messages" -X POST \
+                  -H 'content-type: application/json' \
+                  --data '{"model":"mock-model","max_tokens":1,"messages":[{"role":"user","content":"ping"}]}' 2>/dev/null && break
+                sleep 0.3
+            done
+        fi
+        export ANTHROPIC_BASE_URL="http://127.0.0.1:$MOCK_PORT"
+        export ANTHROPIC_AUTH_TOKEN="mock-key"
+        export ANTHROPIC_API_KEY="mock-key"
+        OPUS_MODEL="${OPUS_MODEL:-$OPUS_MODEL_MOCK}"
+        SONNET_MODEL="${SONNET_MODEL:-$SONNET_MODEL_MOCK}"
+        HAIKU_MODEL="${HAIKU_MODEL:-$HAIKU_MODEL_MOCK}"
+        SUBAGENT_MODEL="${SUBAGENT_MODEL:-$SUBAGENT_MODEL_MOCK}"
+        ;;
+    *)
+        echo "cc-symbolic: unbekannter Modus '$MODE' (erwartet: ollama | anthropic | mock)" >&2
+        usage 2
+        ;;
+esac
+
+# --- claude-code Tier-Env (exportiert — Helper liest process.env) ----------
+export OPUS_MODEL="$OPUS_MODEL"
+export SONNET_MODEL="$SONNET_MODEL"
+export HAIKU_MODEL="$HAIKU_MODEL"
+export SUBAGENT_MODEL="$SUBAGENT_MODEL"
+export ANTHROPIC_DEFAULT_OPUS_MODEL="$OPUS_MODEL"
+export ANTHROPIC_DEFAULT_OPUS_MODEL_NAME="$OPUS_MODEL"
+export ANTHROPIC_DEFAULT_SONNET_MODEL="$SONNET_MODEL"
+export ANTHROPIC_DEFAULT_SONNET_MODEL_NAME="$SONNET_MODEL"
+export ANTHROPIC_DEFAULT_HAIKU_MODEL="$HAIKU_MODEL"
+export ANTHROPIC_DEFAULT_HAIKU_MODEL_NAME="$HAIKU_MODEL"
+export CLAUDE_CODE_SUBAGENT_MODEL="$SUBAGENT_MODEL"
+export CLAUDE_CODE_SUBAGENT_MODEL_NAME="$SUBAGENT_MODEL"
+[[ -z "${ANTHROPIC_API_KEY:-}" ]] && export ANTHROPIC_API_KEY=""
+export ANTHROPIC_MODEL="${ANTHROPIC_MODEL:-$SONNET_MODEL}"
+export CLAUDE_CODE_ATTRIBUTION_HEADER=0
+export DISABLE_TELEMETRY=1
+export DISABLE_AUTOUPDATER=1
+export DISABLE_ERROR_REPORTING=1
+export DISABLE_BUG_COMMAND=1
+
+# --- symbolic-thinking-Env (der Launcher forciert AN; User kann überschreiben) ---
+export symbolic_thinking="${symbolic_thinking:-1}"
+export symbolic_thinking_mode="${symbolic_thinking_mode:-disabled}"
+export symbolic_thinking_decider_tier="${symbolic_thinking_decider_tier:-opus}"
+export symbolic_thinking_judge_tier="${symbolic_thinking_judge_tier:-sonnet}"
+export symbolic_thinking_output_tier="${symbolic_thinking_output_tier:-sonnet}"
+export symbolic_thinking_decider_budget="${symbolic_thinking_decider_budget:-2000}"
+export symbolic_thinking_judge_budget="${symbolic_thinking_judge_budget:-16000}"
+export symbolic_thinking_output_budget="${symbolic_thinking_output_budget:-8000}"
+export symbolic_thinking_max_escalate="${symbolic_thinking_max_escalate:-0}"
+# symbolic_thinking_debug + symbolic_thinking_deep absichtlich NICHT forciert.
+
+cc_debug "$@"
+
+# Binärdatei starten.  Im mock-Modus gilt der Trap (killt den Mock); im ollama-
+# und anthropic-Modus kein Hintergrund-Prozess -> direkt exec wäre ok, aber wir
+# halten das Muster einheitlich.
+"$CLAUDE_TARGET" "$@"
+cc_exit=$?
+exit $cc_exit
