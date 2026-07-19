@@ -191,6 +191,23 @@ var last=msgs[msgs.length-1];
 if(first&&last&&first!==last)return [first,last];
 return last?[last]:[];
 }
+function __symIsCloud(model){
+/* Detect backends that IGNORE thinking:{type:'disabled'} (and budget_tokens):
+   ollama-cloud models (minimax-m3:cloud, *:cloud) and the local ollama proxy
+   (11434/ollama). On these, thinking:disabled alone does NOT bound output —
+   the model still emits huge reasoning. The cap below is the fallback. */
+  try{var m=(''+(model||'')).toLowerCase();var bu=(process.env.ANTHROPIC_BASE_URL||'').toLowerCase();
+   return m.indexOf('minimax')>=0||m.indexOf(':cloud')>=0||bu.indexOf('11434')>=0||bu.indexOf('ollama')>=0;}
+  catch(_){return false;}
+}
+function __symStageMaxTokens(body,budget){
+/* Cloud fallback: cap max_tokens so a backend that ignores thinking:disabled
+   can't run away with 20k+ reasoning tokens per stage. On backends that HONOR
+   thinking:disabled (real Anthropic API), return undefined -> keep the
+   original max_tokens (disabled already prevents reasoning). */
+  if(__symIsCloud(body&&body.model)){var n=parseInt(budget,10);if(n&&n>0)return n;}
+  return undefined;
+}
 function __symDeciderBody(body,feedback){
 var s1tier=process.env.symbolic_thinking_decider_tier||'opus';
 var B1=parseInt(process.env.symbolic_thinking_decider_budget||'1500',10);
@@ -198,6 +215,7 @@ var s1model=__symTierModel(s1tier,body&&body.model);
 var s1msgs=__symTrimMsgs((body&&body.messages)||[]);
 s1msgs.push({role:'user',content:__symDeciderInstr(feedback)});
 var s1body=Object.assign({},body,{model:s1model,stream:false,messages:s1msgs,system:__symSystem(body),thinking:__symThink(B1)});
+var mt1=__symStageMaxTokens(body,B1);if(mt1!==undefined)s1body.max_tokens=mt1;
 delete s1body.tools;
 return s1body;
 }
@@ -208,6 +226,7 @@ var s2model=__symTierModel(s2tier,body&&body.model);
 var msgs=__symTrimMsgs((body&&body.messages)||[]);
 msgs.push({role:'user',content:__symJudgeInstr(construct,depth)});
 var jb=Object.assign({},body,{model:s2model,stream:false,messages:msgs,system:__symSystem(body),thinking:__symThink(B2)});
+var mt2=__symStageMaxTokens(body,B2);if(mt2!==undefined)jb.max_tokens=mt2;
 delete jb.tools;
 return jb;
 }
@@ -216,6 +235,7 @@ var otier=process.env.symbolic_thinking_output_tier||'sonnet';
 var B2out=parseInt(process.env.symbolic_thinking_output_budget||'8000',10);
 var omodel=__symTierModel(otier,body&&body.model);
 var ob=Object.assign({},body,{model:omodel,stream:true,messages:((body&&body.messages)||[]).slice(),system:__symOutputSystem(body,construct),thinking:__symThink(B2out)});
+var mto=__symStageMaxTokens(body,B2out);if(mto!==undefined)ob.max_tokens=mto;
 if(body&&body.tools)ob.tools=body.tools;
 return ob;
 }
