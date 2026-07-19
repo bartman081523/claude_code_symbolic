@@ -180,11 +180,22 @@ if(Array.isArray(orig)){var arr=orig.slice();arr.push({type:'text',text:hidden})
 if(typeof orig==='string'&&orig.length)return [{type:'text',text:orig},{type:'text',text:hidden}];
 return [{type:'text',text:hidden}];
 }
+function __symTrimMsgs(msgs){
+/* Token-saving: decider/judge only need the overall task + current state, not
+   the full multi-turn history (the translator keeps full history). Keep the
+   first user message (the task) + the last message (current state). */
+if(!Array.isArray(msgs)||msgs.length<=2)return (msgs||[]).slice();
+var first=null;
+for(var i=0;i<msgs.length;i++){if(msgs[i]&&msgs[i].role==='user'){first=msgs[i];break;}}
+var last=msgs[msgs.length-1];
+if(first&&last&&first!==last)return [first,last];
+return last?[last]:[];
+}
 function __symDeciderBody(body,feedback){
 var s1tier=process.env.symbolic_thinking_decider_tier||'opus';
-var B1=parseInt(process.env.symbolic_thinking_decider_budget||'2000',10);
+var B1=parseInt(process.env.symbolic_thinking_decider_budget||'1500',10);
 var s1model=__symTierModel(s1tier,body&&body.model);
-var s1msgs=((body&&body.messages)||[]).slice();
+var s1msgs=__symTrimMsgs((body&&body.messages)||[]);
 s1msgs.push({role:'user',content:__symDeciderInstr(feedback)});
 var s1body=Object.assign({},body,{model:s1model,stream:false,messages:s1msgs,system:__symSystem(body),thinking:__symThink(B1)});
 delete s1body.tools;
@@ -192,9 +203,9 @@ return s1body;
 }
 function __symJudgeBody(body,construct,depth){
 var s2tier=process.env.symbolic_thinking_judge_tier||'sonnet';
-var B2=parseInt(process.env.symbolic_thinking_judge_budget||'16000',10);
+var B2=parseInt(process.env.symbolic_thinking_judge_budget||'2500',10);
 var s2model=__symTierModel(s2tier,body&&body.model);
-var msgs=((body&&body.messages)||[]).slice();
+var msgs=__symTrimMsgs((body&&body.messages)||[]);
 msgs.push({role:'user',content:__symJudgeInstr(construct,depth)});
 var jb=Object.assign({},body,{model:s2model,stream:false,messages:msgs,system:__symSystem(body),thinking:__symThink(B2)});
 delete jb.tools;
