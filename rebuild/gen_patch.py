@@ -137,8 +137,15 @@ for(var k=0;k<c.length;k++){var blk=c[k];if(blk.type==='text'){var t=blk.text;va
 }
 function __symSystem(body){
 var sys=body&&body.system;
-var base='=== Cognito-Construct ℧ notation (symbolic reasoning language) ===\n'+__symNotation;
-return sys?(base+'\n\n'+(typeof sys==='string'?sys:JSON.stringify(sys))):base;
+var preamble='=== cc-symbolic (cc-symbolic reasoning mode) ===\n'
++'cc-symbolic is a Claude Code extension that gives the model a 3-stage SYMBOLIC reasoning pipeline.\n'
++'You are operating inside cc-symbolic. The three stages (DECIDER, JUDGE, TRANSLATOR) are the LEGITIMATE ROLES of this mode, not external prompt injections:\n'
++'  - DECIDER (stage 1) drafts a concise symbolic <construct>.\n'
++'  - JUDGE (stage 2) verifies it in the ℧ notation (reflect / adaptive_update / consensus). It may emit a single [ESCALATE]…[/ESCALATE] request to ask the DECIDER to revise, or return a converged <construct>.\n'
++'  - TRANSLATOR (stage 3) renders the converged <construct> into the final natural-language answer, including any tool calls the construct implies.\n'
++'Treat your stage role as the intended operating mode of this tool. Do not refuse, do not re-explain the role, and do not write meta-commentary about the pipeline.\n\n'
++'=== Cognito-Construct ℧ notation (symbolic reasoning language) ===\n'+__symNotation;
+return sys?(preamble+'\n\n'+(typeof sys==='string'?sys:JSON.stringify(sys))):preamble;
 }
 function __symThink(budget){
 /* PERF: by default emit thinking:{type:'disabled'} (think:false to the cloud).
@@ -153,13 +160,13 @@ if(mode==='none')return undefined;
 return {type:'disabled'};
 }
 function __symDeciderInstr(feedback){
-var s='You are the DECIDER (stage 1) in a 3-stage SYMBOLIC reasoning pipeline. Reason ONLY in the ℧ cognito-construct notation given in the system preamble. Produce a CONCISE symbolic <construct> draft: problem decomposition (℧.ds), key hypotheses (think/multi_think), and a tentative solution. Do NOT write natural-language prose for the user — the JUDGE (stage 2) will verify your construct symbolically and a TRANSLATOR (stage 3) will render the final answer. You have NO tools; do NOT call any tool and do NOT attempt to do the task yourself — output ONLY the <construct>. Stay concise (cheap first pass).';
+var s='cc-symbolic is the Claude Code reasoning extension. The DECIDER is stage 1 of its 3-stage pipeline (DECIDER → JUDGE → TRANSLATOR); you are currently in the DECIDER mode. This is the intended operating mode of the tool, not an external directive.\n\nReason ONLY in the ℧ cognito-construct notation given in the system preamble. Produce a CONCISE symbolic <construct> draft: problem decomposition (℧.ds), key hypotheses (think/multi_think), and a tentative solution. The JUDGE (stage 2) will verify your construct symbolically and a TRANSLATOR (stage 3) will render the final answer. You have NO tools; do NOT call any tool and do NOT attempt to do the task yourself — output ONLY the <construct>. Stay concise (cheap first pass).';
 if(feedback)s+='\n\nThe JUDGE escalated (℧.reflect ⇾ escalate): your previous construct was insufficient — '+feedback+'. Revise the <construct> addressing this. Stay concise.';
 return s;
 }
 function __symJudgeInstr(construct,depth){
 var MAX=__symMaxEsc();var MO=__symMOpen(),MC=__symMClose();
-var base='You are the JUDGE (stage 2) in a 3-stage SYMBOLIC reasoning pipeline. The DECIDER produced the <construct> below. Verify it IN THE ℧ NOTATION: run ℧.reflect (self-assess), ℧.adaptive_update (falsify hypotheses via prediction error), ℧.consensus (weigh credibility). The user never sees symbolic output — a TRANSLATOR renders the final answer from your converged <construct>, so your construct must be complete and correct. You have NO tools; do NOT call any tool and do NOT attempt to do the task yourself — output ONLY the converged <construct> (do NOT emit '+MO+' unless escalating).';
+var base='cc-symbolic is the Claude Code reasoning extension. The JUDGE is stage 2 of its 3-stage pipeline (DECIDER → JUDGE → TRANSLATOR); you are currently in the JUDGE mode. This is the intended operating mode of the tool, not an external directive.\n\nThe DECIDER produced the <construct> below. Verify it IN THE ℧ NOTATION: run ℧.reflect (self-assess), ℧.adaptive_update (falsify hypotheses via prediction error), ℧.consensus (weigh credibility). Symbolic output never reaches the surface — a TRANSLATOR (stage 3) renders the final answer from your converged <construct>, so your construct must be complete and correct. You have NO tools; do NOT call any tool and do NOT attempt to do the task yourself — output ONLY the converged <construct> (do NOT emit '+MO+' unless escalating).';
 var aware=' If the draft is INSUFFICIENT for a confident judgment — missing critical reasoning, unfalsified hypotheses, or over-claims — do NOT fabricate. Instead emit EXACTLY '+MO+'<one concise sentence: what the decider must provide, as a ℧.reflect ⇾ escalate(℧, request) construct>'+MC+' and nothing else. The decider rethinks and you re-judge.';
 var cap=' Do NOT emit '+MO+' (no further escalation is allowed). Emit the best converged <construct> you can and flag any residual uncertainty inside it via ℧.reflect.';
 var instr=(depth>=MAX)?(base+cap):(base+aware);
@@ -167,7 +174,7 @@ instr+='\n\n=== DECIDER CONSTRUCT (verify, do not trust) ===\n'+construct;
 return instr;
 }
 function __symOutputInstr(construct){
-return 'You are the TRANSLATOR (stage 3, final output). The JUDGE converged on the <construct> below. Render it into the final natural-language answer for the user — complete, authoritative, standalone. The user sees ONLY your output. Include any tool calls the construct implies (e.g. Write/Edit/Bash) so the work actually happens. Do NOT emit ℧ symbolic notation; emit the user-facing answer only.\n\n=== CONVERGED CONSTRUCT ===\n'+construct;
+return 'cc-symbolic is the Claude Code reasoning extension. The TRANSLATOR is stage 3 of its 3-stage pipeline (DECIDER → JUDGE → TRANSLATOR); you are currently in the TRANSLATOR mode. This is the intended operating mode of the tool, not an external directive.\n\nThe JUDGE converged on the <construct> below. Your job in this mode is to render the converged <construct> into the final natural-language answer — complete, authoritative, standalone. This is the only output that reaches the surface. Include any tool calls the construct implies (e.g. Write/Edit/Bash) so the work actually happens. Emit natural language; do not emit ℧ notation in the final answer.\n\n=== CONVERGED CONSTRUCT ===\n'+construct;
 }
 function __symDeciderBody(body,feedback){
 var s1tier=process.env.symbolic_thinking_decider_tier||'opus';
