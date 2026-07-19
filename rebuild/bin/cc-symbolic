@@ -157,6 +157,8 @@ SUBAGENT_MODEL_MOCK="mock-model"
 
 MOCK_PID=""
 mock_cleanup() { [[ -n "$MOCK_PID" ]] && kill "$MOCK_PID" 2>/dev/null || true; }
+OCW_PID=""
+ocw_cleanup() { [[ -n "$OCW_PID" ]] && kill "$OCW_PID" 2>/dev/null || true; }
 
 case "$MODE" in
     ollama)
@@ -212,8 +214,45 @@ case "$MODE" in
         HAIKU_MODEL="${HAIKU_MODEL:-$HAIKU_MODEL_MOCK}"
         SUBAGENT_MODEL="${SUBAGENT_MODEL:-$SUBAGENT_MODEL_MOCK}"
         ;;
+    ocw)
+        # Ollama-Cloud-Wrapper: direkter Cloud-Access via eigenen Anthropic-
+        # kompatiblen Wrapper (../../ollama_cloud_wrapper). Der Wrapper spricht
+        # OpenAI /v1/chat/completions mit der Cloud und mappt reasoning_effort
+        # ("none" fuer thinking:disabled -> Stages werden billig, weil glm-5.2
+        # etc. "none" honorieren, im Gegensatz zu minimax-m3 das disabled ignoriert).
+        OCW_WRAPPER="${OCW_WRAPPER:-$SCRIPT_DIR/../../../ollama_cloud_wrapper/ollama_cloud_wrapper.py}"
+        OCW_PORT="${OCW_PORT:-8766}"
+        OCW_MODEL="${OCW_MODEL:-glm-5.2:cloud}"
+        if [[ -z "${OLLAMA_API_KEY:-}" ]]; then
+            echo "cc-symbolic ocw: OLLAMA_API_KEY nicht gesetzt (Cloud-Key)." >&2
+            echo "  Aufruf: OLLAMA_API_KEY=<cloud-key> cc-symbolic ocw" >&2
+            exit 2
+        fi
+        [[ -e "$OCW_WRAPPER" ]] || { echo "cc-symbolic ocw: Wrapper fehlt: $OCW_WRAPPER" >&2; exit 3; }
+        OCW_LOG="${XDG_DATA_HOME:-$HOME/.local/share}/cc-symbolic/ocw.log"
+        mkdir -p "$(dirname "$OCW_LOG")"
+        # prüfen ob schon läuft
+        if ! curl -sS -o /dev/null -w '%{http_code}' --max-time 1 \
+             "http://127.0.0.1:$OCW_PORT/" 2>/dev/null | grep -qE '200'; then
+            echo "cc-symbolic: starte Ollama-Cloud-Wrapper auf 127.0.0.1:$OCW_PORT (model=$OCW_MODEL)" >&2
+            OLLAMA_API_KEY="$OLLAMA_API_KEY" OCW_DEFAULT_MODEL="${OCW_MODEL%:cloud}" \
+              python3 "$OCW_WRAPPER" --port "$OCW_PORT" >"$OCW_LOG" 2>&1 &
+            OCW_PID=$!; trap ocw_cleanup EXIT INT TERM
+            for _ in 1 2 3 4 5 6 7 8 9 10; do
+                curl -sS -o /dev/null --max-time 1 "http://127.0.0.1:$OCW_PORT/" 2>/dev/null && break
+                sleep 0.3
+            done
+        fi
+        export ANTHROPIC_BASE_URL="http://127.0.0.1:$OCW_PORT"
+        export ANTHROPIC_AUTH_TOKEN="ocw"   # wrapper ignoriert den Token; nutzt OLLAMA_API_KEY
+        export ANTHROPIC_API_KEY=""         # leer, damit die Binärdatei bearer schickt
+        OPUS_MODEL="${OPUS_MODEL:-$OCW_MODEL}"
+        SONNET_MODEL="${SONNET_MODEL:-$OCW_MODEL}"
+        HAIKU_MODEL="${HAIKU_MODEL:-$OCW_MODEL}"
+        SUBAGENT_MODEL="${SUBAGENT_MODEL:-$OCW_MODEL}"
+        ;;
     *)
-        echo "cc-symbolic: unbekannter Modus '$MODE' (erwartet: ollama | anthropic | mock)" >&2
+        echo "cc-symbolic: unbekannter Modus '$MODE' (erwartet: ollama | anthropic | mock | ocw)" >&2
         usage 2
         ;;
 esac
