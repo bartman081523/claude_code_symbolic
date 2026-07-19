@@ -102,12 +102,19 @@ var __tsLog=function(m){if(!__tsDbg())return;try{require('fs').appendFileSync('/
 if(__tsDbg())try{require('fs').appendFileSync('/tmp/ts.log','LOAD two-stage helper v2 (escalation)\n')}catch(_){}
 var __SCIMIND_PREAMBLE__=__PREAMBLE_PLACEHOLDER__;
 var __tsSymNotation=__SYM_NOTATION_PLACEHOLDER__;
+function __tsFlagOn(name){try{var v=process.env[name];if(v===undefined||v===null)return false;v=(''+v).trim().toLowerCase();return v==='1'||v==='true'||v==='yes'||v==='on';}catch(_){return false;}}
+function __tsScimindOn(){return __tsFlagOn('TWO_STAGE_SCIMIND');}
+function __tsScimindSys(sys){
+if(!__tsScimindOn())return sys;
+var p=__SCIMIND_PREAMBLE__;
+if(!sys)return p;
+return p+'\n\n'+(typeof sys==='string'?sys:JSON.stringify(sys));
+}
 function __tsTrigger(b){
 try{
-var E=process.env.TWO_STAGE_ENABLED;
-if(E!==undefined&&E!==null&&(E==='0'||E==='false'||E==='no'||E==='off'))return false;
 if(__tsInStage1)return false;
 if(!b||!b.thinking||(b.thinking.type!=='enabled'&&b.thinking.type!=='adaptive'))return false;
+if(!(__tsFlagOn('TWO_STAGE_ENABLED')||__tsFlagOn('TWO_STAGE_SYMBOLIC')))return false;
 var M=process.env.TWO_STAGE_TRIGGER_MODELS;
 if(M){var ok=(''+M).split(',').map(function(s){return s.trim()}).filter(Boolean);
 if(ok.length&&ok.indexOf(b.model)<0)return false;}
@@ -162,7 +169,7 @@ var instr=__tsJudgeInstr(draftText||'',depth);
 var msgs=((body&&body.messages)||[]).slice();
 msgs.push({role:'user',content:instr});
 var sys=body&&body.system;
-var judgeSystem=sys?(__SCIMIND_PREAMBLE__+'\n\n'+(typeof sys==='string'?sys:JSON.stringify(sys))):__SCIMIND_PREAMBLE__;
+var judgeSystem=__tsScimindSys(sys);
 var judge=Object.assign({},body,{model:s2model,thinking:{type:'enabled',budget_tokens:B2},messages:msgs,system:judgeSystem});
 if(body&&body.tools)judge.tools=body.tools;
 return judge;
@@ -191,7 +198,7 @@ function __tsSymEnabled(){try{var E=process.env.TWO_STAGE_SYMBOLIC;if(E===undefi
 function __tsOutputTier(){try{return process.env.TWO_STAGE_OUTPUT_TIER||'sonnet';}catch(_){return 'sonnet';}}
 function __tsSymSystem(body){
 var sys=body&&body.system;
-var base=__SCIMIND_PREAMBLE__+'\n\n=== Cognito-Construct ℧ notation (symbolic reasoning language) ===\n'+__tsSymNotation;
+var base=(__tsScimindOn()?(__SCIMIND_PREAMBLE__+'\n\n'):'')+'=== Cognito-Construct ℧ notation (symbolic reasoning language) ===\n'+__tsSymNotation;
 return sys?(base+'\n\n'+(typeof sys==='string'?sys:JSON.stringify(sys))):base;
 }
 function __tsSymDeciderInstr(feedback){
@@ -412,7 +419,12 @@ def hooka_repl(orig_post: str, body_var: str, stream_expr: str) -> str:
         "if(esc!==null)__tsStripMarker(msg);"
         "return msg;"
         "}})();"
-        "}" + orig_post
+        "}"
+        # --- stock (non-triggered) path: apply SciMind preamble if opt-in.
+        #     Surgical: when TWO_STAGE_SCIMIND is off, this guard is false and
+        #     orig_post runs unchanged (byte-identical to untouched stock).
+        "if(__tsScimindOn()){" + body_var + "=Object.assign({}," + body_var + ",{system:__tsScimindSys(" + body_var + "&&" + body_var + ".system)});}"
+        + orig_post
     )
 
 

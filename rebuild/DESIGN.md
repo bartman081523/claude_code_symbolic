@@ -430,6 +430,45 @@ raw-stream return) is deterministically verified by the 4 dedicated node-harness
 tests with a mocked client. The common case (1× judge, no escalation) — which
 the design optimizes for — works live end-to-end.
 
+## v3.1: 3 independent opt-in flags (ENABLED / SYMBOLIC / SCIMIND)
+
+The three behaviors that were previously entangled are now **three independent
+opt-in env-var switches**, each **surgical**: when off, the patched binary's
+request path is byte-identical to untouched stock for that behavior.
+
+| flag | on → | off (surgical) |
+|---|---|---|
+| `TWO_STAGE_ENABLED` | 2-stage NL (decider→judge) | no 2-stage split |
+| `TWO_STAGE_SYMBOLIC` | 3-stage symbolic (decider↔judge in `℧` + translator) | no symbolic branch |
+| `TWO_STAGE_SCIMIND` | SciMind-5.0 epistemic preamble in judge/translator system (and in the stock-path `system`) | no SciMind preamble anywhere |
+
+**Trigger gate** (`__tsTrigger`): fires iff `body.thinking` is enabled/adaptive
+**and** (`TWO_STAGE_ENABLED` **or** `TWO_STAGE_SYMBOLIC`) is truthy. So either
+ENABLED or SYMBOLIC alone engages the thinking split. The symbolic branch is
+checked **first** in Hook A (`if(__tsSymEnabled())`), so SYMBOLIC takes
+precedence when both are on (110 == 100, 111 == 101).
+
+**SciMind** is decoupled from the trigger entirely: it is a pure system-preamble
+injection applied (a) in the judge/translator `system` of the 2-stage/symbolic
+paths, and (b) in the **stock path** via a guarded `if(__tsScimindOn()){
+o=Object.assign({},o,{system:__tsScimindSys(o&&o.system)});}` before
+`orig_post`. When `TWO_STAGE_SCIMIND` is off, the guard is false and `orig_post`
+runs unchanged — byte-identical to stock.
+
+**Helpers added** (`gen_patch.py`): `__tsFlagOn(name)` (canonical truthy parse:
+`1`/`true`/`yes`/`on`), `__tsScimindOn()`, `__tsScimindSys(sys)` (preconditionally
+prepends the preamble). `__tsJudgeBody` and `__tsSymSystem` now call
+`__tsScimindSys` instead of always prepending.
+
+**Verified (8-combo matrix, live vs Ollama Cloud, chemistry question).** Binary
+boots `2.1.214`; node harness `test_escalation.js` **92/92**. Surgical guarantee
+confirmed: combos 000 (all off) and 001 (SciMind only, no 2-stage) emit **zero**
+`tr=true`/`[ha-sym]`/`[sym]` trace lines — pure stock path. The 2-stage combos
+(010/011) show `[ha] tr=true`; the symbolic combos (100/101/110/111) show
+`[ha-sym] symbolic 3-stage` + a real `<construct>` in `/tmp/ts.log`. All 8
+produce a coherent chemistry answer (see commit / run log). `cc2stage --debug`
+now logs `TWO_STAGE_SCIMIND` alongside the other `TWO_STAGE_*` vars.
+
 ## Future (separate plan — compressed symbolic context)
 
 The symbolic channel (v3, above) is now shipped. The deferred next step is

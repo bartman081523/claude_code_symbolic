@@ -64,11 +64,22 @@ Tier-Defaults (mode-abhängig, per Env-Var überschreibbar):
   TWO_STAGE_MAX_ESCALATE=2       Max Judge->Decider-Eskalationsrunden (0=keine)
   TWO_STAGE_DEBUG=<unset>        Setzen -> Trace nach /tmp/ts.log
 
+SciMind-5.0-Epistemic-Mandate (v3, opt-in — Präambel in system injiziert,
+                               nur wenn eingeschaltet; surgical, Default off):
+  TWO_STAGE_SCIMIND=1             1 = SciMind-Präambel in judge/translator
+                                 (und in stock-path system); unset = aus
+
 3-Stage Symbolic-Modus (v3, opt-in — decider↔judge in ℧-Notation +
                           sonnet-Translator rendert die finale Antwort):
   TWO_STAGE_SYMBOLIC=1           1 = 3-stage symbolic; unset = v2 (Default)
   TWO_STAGE_OUTPUT_TIER=sonnet   Translator-Tier -> SONNET_MODEL
   TWO_STAGE_OUTPUT_BUDGET=8000   Translator Thinking-Budget
+
+Die 3 Optionen (ENABLED, SYMBOLIC, SCIMIND) sind UNABHÄNGIGE opt-in-Schalter.
+Jeder ist für sich surgical: wenn aus, ist der betreffende Pfad byte-identisch
+zum untouched stock. Kombinationen (E,S,C):
+  000=stock  001=stock+SciMind  010=2-stage-NL  011=2-stage+SciMind
+  100=symbolic  101=symbolic+SciMind  110=symbolic  111=symbolic+SciMind
 
 Variablen: OPUS_MODEL, SONNET_MODEL, HAIKU_MODEL, SUBAGENT_MODEL,
            TWO_STAGE_*
@@ -112,7 +123,7 @@ cc_debug() {
         if [[ ${#t} -gt 16 ]]; then token_log="${t:0:8}…${t: -4}"
         else token_log="<set, ${#t} chars>"; fi
     else token_log="<empty>"; fi
-    line=$(printf '[%s] cc2stage debug\n  mode=%s\n  bin=%s\n  ANTHROPIC_BASE_URL=%s\n  ANTHROPIC_AUTH_TOKEN=%s\n  OPUS_MODEL=%s\n  SONNET_MODEL=%s\n  HAIKU_MODEL=%s\n  SUBAGENT_MODEL=%s\n  TWO_STAGE_ENABLED=%s\n  TWO_STAGE_STAGE1_TIER=%s\n  TWO_STAGE_STAGE2_TIER=%s\n  TWO_STAGE_DECIDER_BUDGET=%s\n  TWO_STAGE_JUDGE_BUDGET=%s\n  TWO_STAGE_MAX_ESCALATE=%s\n  TWO_STAGE_SYMBOLIC=%s\n  TWO_STAGE_OUTPUT_TIER=%s\n  TWO_STAGE_OUTPUT_BUDGET=%s\n  TWO_STAGE_DEBUG=%s\n  claude_args=%s' \
+    line=$(printf '[%s] cc2stage debug\n  mode=%s\n  bin=%s\n  ANTHROPIC_BASE_URL=%s\n  ANTHROPIC_AUTH_TOKEN=%s\n  OPUS_MODEL=%s\n  SONNET_MODEL=%s\n  HAIKU_MODEL=%s\n  SUBAGENT_MODEL=%s\n  TWO_STAGE_ENABLED=%s\n  TWO_STAGE_STAGE1_TIER=%s\n  TWO_STAGE_STAGE2_TIER=%s\n  TWO_STAGE_DECIDER_BUDGET=%s\n  TWO_STAGE_JUDGE_BUDGET=%s\n  TWO_STAGE_MAX_ESCALATE=%s\n  TWO_STAGE_SCIMIND=%s\n  TWO_STAGE_SYMBOLIC=%s\n  TWO_STAGE_OUTPUT_TIER=%s\n  TWO_STAGE_OUTPUT_BUDGET=%s\n  TWO_STAGE_DEBUG=%s\n  claude_args=%s' \
         "$ts" "$MODE" "$CLAUDE_TARGET" \
         "${ANTHROPIC_BASE_URL:-<unset>}" "$token_log" \
         "${OPUS_MODEL:-<unset>}" "${SONNET_MODEL:-<unset>}" \
@@ -120,7 +131,8 @@ cc_debug() {
         "${TWO_STAGE_ENABLED:-<unset>}" "${TWO_STAGE_STAGE1_TIER:-<unset>}" \
         "${TWO_STAGE_STAGE2_TIER:-<unset>}" "${TWO_STAGE_DECIDER_BUDGET:-<unset>}" \
         "${TWO_STAGE_JUDGE_BUDGET:-<unset>}" "${TWO_STAGE_MAX_ESCALATE:-<unset>}" \
-        "${TWO_STAGE_SYMBOLIC:-<unset>}" "${TWO_STAGE_OUTPUT_TIER:-<unset>}" \
+        "${TWO_STAGE_SCIMIND:-<unset>}" "${TWO_STAGE_SYMBOLIC:-<unset>}" \
+        "${TWO_STAGE_OUTPUT_TIER:-<unset>}" \
         "${TWO_STAGE_OUTPUT_BUDGET:-<unset>}" "${TWO_STAGE_DEBUG:-<unset>}" "$*")
     printf '%s\n' "$line" >&2
     local logdir; logdir="$(dirname "$CC_DEBUG_LOG")"

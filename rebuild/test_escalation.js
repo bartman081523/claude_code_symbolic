@@ -19,6 +19,7 @@ const HELPER = JSON.parse(helperJs);  // the JS source string
 // Clean env so __tsDbg is off (no /tmp/ts.log writes).
 delete process.env.TWO_STAGE_DEBUG;
 process.env.TWO_STAGE_ENABLED = '1';
+process.env.TWO_STAGE_SCIMIND = '1';   // canonical v2 config: judge carries SciMind (opt-in now)
 process.env.TWO_STAGE_MAX_ESCALATE = '2';
 process.env.TWO_STAGE_DECIDER_CONCISE = '1';
 process.env.TWO_STAGE_STAGE1_TIER = 'opus';
@@ -323,6 +324,60 @@ const body = { model: 'opus-mock', thinking: { type: 'enabled', budget_tokens: 2
   ok('sym shape: has response', r10.response && r10.response.status === 200);
   ok('sym shape: has request_id', typeof r10.request_id === 'string');
   ok('sym shape: data is the raw SDK stream (not a Proxy wrapper)', 'controller' in r10.data && typeof r10.data[Symbol.asyncIterator] === 'function');
+
+  // === 3-OPT-IN TRUTH TABLE ===============================================
+  console.log('\nTEST 11: __tsFlagOn opt-in semantics');
+  delete process.env.TWO_STAGE_ENABLED; delete process.env.TWO_STAGE_SYMBOLIC; delete process.env.TWO_STAGE_SCIMIND;
+  ok('flag unset -> off', H.__tsFlagOn('TWO_STAGE_SCIMIND') === false);
+  process.env.TWO_STAGE_SCIMIND = '0'; ok('flag 0 -> off', H.__tsFlagOn('TWO_STAGE_SCIMIND') === false);
+  process.env.TWO_STAGE_SCIMIND = 'no'; ok('flag no -> off', H.__tsFlagOn('TWO_STAGE_SCIMIND') === false);
+  process.env.TWO_STAGE_SCIMIND = '1'; ok('flag 1 -> on', H.__tsFlagOn('TWO_STAGE_SCIMIND') === true);
+  process.env.TWO_STAGE_SCIMIND = 'true'; ok('flag true -> on', H.__tsFlagOn('TWO_STAGE_SCIMIND') === true);
+  process.env.TWO_STAGE_SCIMIND = 'ON'; ok('flag ON (case-insensitive) -> on', H.__tsFlagOn('TWO_STAGE_SCIMIND') === true);
+
+  console.log('TEST 12: __tsTrigger opt-in truth table (thinking enabled body)');
+  const thinkBody = { model: 'opus-mock', thinking: { type: 'enabled', budget_tokens: 2000 }, messages: [{ role: 'user', content: 'q' }] };
+  function setFlags(en, sym) { if (en) process.env.TWO_STAGE_ENABLED = '1'; else delete process.env.TWO_STAGE_ENABLED; if (sym) process.env.TWO_STAGE_SYMBOLIC = '1'; else delete process.env.TWO_STAGE_SYMBOLIC; }
+  setFlags(false, false); ok('000 trigger false (stock)', H.__tsTrigger(thinkBody) === false);
+  setFlags(true, false);  ok('010 trigger true (2-stage)', H.__tsTrigger(thinkBody) === true);
+  setFlags(false, true);  ok('100 trigger true (symbolic forces)', H.__tsTrigger(thinkBody) === true);
+  setFlags(true, true);   ok('110 trigger true', H.__tsTrigger(thinkBody) === true);
+  // no thinking -> never triggers even with flags
+  ok('no-thinking body never triggers', H.__tsTrigger({ model: 'x' }) === false);
+  setFlags(false, false);
+  ok('non-thinking body with scimind only -> no 2-stage trigger', H.__tsTrigger({ model: 'x', thinking: { type: 'disabled' } }) === false);
+
+  console.log('TEST 13: SciMind preamble is opt-in (conditional in judge + symbolic system)');
+  delete process.env.TWO_STAGE_SCIMIND;
+  const jbNoSci = H.__tsJudgeBody(sbody, 'draft', 0);
+  ok('scimind OFF: judge system has NO SciMind preamble', !/epistemic|humility|falsif/i.test(jbNoSci.system) || jbNoSci.system.length < 300);
+  ok('scimind OFF: judge system is original sys', /SYS/.test(jbNoSci.system));
+  const symSysNoSci = H.__tsSymSystem(sbody);
+  ok('scimind OFF: symbolic system still has ℧ notation', /℧/.test(symSysNoSci));
+  ok('scimind OFF: symbolic system has NO SciMind', !/SciMind|Epistemic Humility|Incomplete Suggestion Protocol/i.test(symSysNoSci));
+  process.env.TWO_STAGE_SCIMIND = '1';
+  const jbSci = H.__tsJudgeBody(sbody, 'draft', 0);
+  ok('scimind ON: judge system HAS SciMind preamble', jbSci.system.length > jbNoSci.system.length && /SYS/.test(jbSci.system));
+  const symSysSci = H.__tsSymSystem(sbody);
+  ok('scimind ON: symbolic system has BOTH SciMind + ℧', /℧/.test(symSysSci) && symSysSci.length > symSysNoSci.length);
+  ok('scimind ON: __tsScimindSys(sys) prepends preamble', /SYS/.test(H.__tsScimindSys('SYS')));
+  delete process.env.TWO_STAGE_SCIMIND;
+  ok('scimind OFF: __tsScimindSys(sys) returns sys unchanged', H.__tsScimindSys('SYS') === 'SYS');
+  ok('scimind OFF: __tsScimindSys(undefined) returns undefined', H.__tsScimindSys(undefined) === undefined);
+
+  console.log('TEST 14: symbolic run respects scimind (translator system conditional)');
+  // symbolic normal run with scimind ON -> translator system has SciMind
+  process.env.TWO_STAGE_MAX_ESCALATE = '2';
+  process.env.TWO_STAGE_SCIMIND = '1';
+  symTranslatorBody = null; symDeciderCalls = 0; symJudgeCalls = 0; symTranslatorCalls = 0;
+  const c14 = makeSymClient({ escalateFirst: false });
+  await H.__tsSymbolicRun(c14, sbody, {});
+  ok('scimind ON: translator body system has SciMind', symTranslatorBody && /epistemic|humility|falsif/i.test(symTranslatorBody.system));
+  delete process.env.TWO_STAGE_SCIMIND;
+  symTranslatorBody = null; symDeciderCalls = 0; symJudgeCalls = 0; symTranslatorCalls = 0;
+  const c14b = makeSymClient({ escalateFirst: false });
+  await H.__tsSymbolicRun(c14b, sbody, {});
+  ok('scimind OFF: translator body system has NO SciMind', symTranslatorBody && !/SciMind|Epistemic Humility|Incomplete Suggestion Protocol/i.test(symTranslatorBody.system));
 
   console.log(`\nRESULT: ${pass} pass, ${fail} fail`);
   process.exit(fail ? 1 : 0);
