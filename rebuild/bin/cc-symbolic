@@ -50,12 +50,14 @@ cc-symbolic — Claude-Code-Launcher für die symbolic-only-Binärdatei (3-stage
 
 Usage:
   cc-symbolic ollama     [claude-args...]   Backend = lokales Ollama, symbolic AN
+  cc-symbolic nvidia     [claude-args...]   Backend = NVIDIA NIM
   cc-symbolic anthropic  [claude-args...]   Backend = ANTHROPIC ORIGINAL-API
   cc-symbolic mock       [claude-args...]   Backend = lokaler Mock (zum Testen)
   cc-symbolic --help | -h                   Diese Hilfe
 
 Tier-Defaults (mode-abhängig, per Env-Var überschreibbar):
   ollama:    Opus=Sonnet=Haiku=Subagent = minimax-m3:cloud
+  nvidia:    Opus=Sonnet=Haiku=Subagent = z-ai/glm-5.2
   anthropic: Opus=claude-opus-4-8, Sonnet=Haiku=Subagent = claude-sonnet-5
   mock:      Opus=Sonnet=Haiku=Subagent = mock-model
 
@@ -145,6 +147,11 @@ SONNET_MODEL_OLLAMA="minimax-m3:cloud"
 HAIKU_MODEL_OLLAMA="minimax-m3:cloud"
 SUBAGENT_MODEL_OLLAMA="minimax-m3:cloud"
 
+OPUS_MODEL_NVIDIA="z-ai/glm-5.2"
+SONNET_MODEL_NVIDIA="z-ai/glm-5.2"
+HAIKU_MODEL_NVIDIA="z-ai/glm-5.2"
+SUBAGENT_MODEL_NVIDIA="z-ai/glm-5.2"
+
 OPUS_MODEL_ANTHROPIC="claude-opus-4-8"
 SONNET_MODEL_ANTHROPIC="claude-sonnet-5"
 HAIKU_MODEL_ANTHROPIC="claude-sonnet-5"
@@ -159,6 +166,12 @@ MOCK_PID=""
 mock_cleanup() { [[ -n "$MOCK_PID" ]] && kill "$MOCK_PID" 2>/dev/null || true; }
 OCW_PID=""
 ocw_cleanup() { [[ -n "$OCW_PID" ]] && kill "$OCW_PID" 2>/dev/null || true; }
+SHIM_PID=""
+SHIM_PID_FILE=""
+shim_cleanup() {
+    [[ -n "$SHIM_PID" ]] && kill "$SHIM_PID" 2>/dev/null || true
+    [[ -n "$SHIM_PID_FILE" ]] && rm -f "$SHIM_PID_FILE" || true
+}
 
 case "$MODE" in
     ollama)
@@ -168,6 +181,70 @@ case "$MODE" in
         SONNET_MODEL="${SONNET_MODEL:-$SONNET_MODEL_OLLAMA}"
         HAIKU_MODEL="${HAIKU_MODEL:-$HAIKU_MODEL_OLLAMA}"
         SUBAGENT_MODEL="${SUBAGENT_MODEL:-$SUBAGENT_MODEL_OLLAMA}"
+        ;;
+    nvidia)
+        # NVIDIA NIM via anthropic_openai_shim.py.
+        # Standard-Token setzen, falls nicht übergeben.
+        export NVAPI_KEY="${NVAPI_KEY:-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}"
+        
+        # Shim starten, falls nicht bereits laufend.
+        SHIM_BIN="${SHIM_BIN:-$(dirname "$(readlink -f "$0")")/../tools/anthropic_openai_shim.py}"
+        SHIM_PORT="${SHIM_PORT:-9876}"
+        SHIM_DATA_DIR="${XDG_DATA_HOME:-$HOME/.local/share}/cc-symbolic"
+        SHIM_PID_FILE="$SHIM_DATA_DIR/shim.pid"
+        mkdir -p "$SHIM_DATA_DIR"
+
+        # Health-Check: GET /v1/models mit 200 OK = läuft.
+        shim_is_up() {
+            for _ in 1 2 3 4 5; do
+                local code
+                code="$(curl -sS -o /dev/null -w '%{http_code}' --max-time 1 \
+                    "http://127.0.0.1:$SHIM_PORT/v1/models" \
+                    -H "Authorization: Bearer $NVAPI_KEY" 2>/dev/null || echo 000)"
+                if [[ "$code" == "200" ]]; then
+                    return 0
+                fi
+                sleep 0.2
+            done
+            return 1
+        }
+
+        if ! shim_is_up; then
+            [[ -x "$SHIM_BIN" ]] || SHIM_BIN="python3 $SHIM_BIN"
+            if [[ ! -e "$(echo "$SHIM_BIN" | awk '{print $NF}')" ]]; then
+                echo "cc-symbolic nvidia: Shim-Binary nicht gefunden: $SHIM_BIN" >&2
+                exit 3
+            fi
+            if [[ "$CC_DEBUG" -eq 1 && -z "${SHIM_LOG_LEVEL:-}" ]]; then
+                SHIM_LOG_LEVEL_EFFECTIVE="debug"
+            else
+                SHIM_LOG_LEVEL_EFFECTIVE="${SHIM_LOG_LEVEL:-info}"
+            fi
+            echo "cc-symbolic: starte Shim auf 127.0.0.1:$SHIM_PORT" >&2
+            SHIM_API_KEY="$NVAPI_KEY" \
+            SHIM_PORT="$SHIM_PORT" \
+            SHIM_UPSTREAM="${SHIM_UPSTREAM:-https://integrate.api.nvidia.com}" \
+            SHIM_LOG_LEVEL="$SHIM_LOG_LEVEL_EFFECTIVE" \
+                $SHIM_BIN >"$SHIM_DATA_DIR/shim.log" 2>&1 &
+            SHIM_PID=$!
+            SHIM_PID_FILE="$SHIM_PID_FILE"
+            echo "$SHIM_PID" > "$SHIM_PID_FILE"
+            trap shim_cleanup EXIT INT TERM
+            if ! shim_is_up; then
+                echo "cc-symbolic: Shim ist nach 1s nicht hochgekommen. Log:" >&2
+                tail -20 "$SHIM_DATA_DIR/shim.log" >&2
+                kill "$SHIM_PID" 2>/dev/null || true
+                rm -f "$SHIM_PID_FILE"
+                exit 4
+            fi
+        fi
+
+        export ANTHROPIC_BASE_URL="http://127.0.0.1:$SHIM_PORT"
+        export ANTHROPIC_AUTH_TOKEN="$NVAPI_KEY"
+        OPUS_MODEL="${OPUS_MODEL:-$OPUS_MODEL_NVIDIA}"
+        SONNET_MODEL="${SONNET_MODEL:-$SONNET_MODEL_NVIDIA}"
+        HAIKU_MODEL="${HAIKU_MODEL:-$HAIKU_MODEL_NVIDIA}"
+        SUBAGENT_MODEL="${SUBAGENT_MODEL:-$SUBAGENT_MODEL_NVIDIA}"
         ;;
     anthropic)
         # Echte Anthropic-API.  Key via ANTHROPIC_API_KEY oder ANTHROPIC_AUTH_TOKEN.
@@ -252,7 +329,7 @@ case "$MODE" in
         SUBAGENT_MODEL="${SUBAGENT_MODEL:-$OCW_MODEL}"
         ;;
     *)
-        echo "cc-symbolic: unbekannter Modus '$MODE' (erwartet: ollama | anthropic | mock | ocw)" >&2
+        echo "cc-symbolic: unbekannter Modus '$MODE' (erwartet: ollama | nvidia | anthropic | mock | ocw)" >&2
         usage 2
         ;;
 esac

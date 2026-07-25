@@ -120,15 +120,20 @@ else info.other++;}}catch(_){}
 return info;
 }
 function __symMessageText(msg){
-/* Extract text blocks. Fallback: if no text, extract thinking blocks
-   (minimax via Ollama sometimes puts the whole answer in the reasoning
-   channel when thinking is omitted/disabled, leaving text empty). */
+/* Extract text blocks. Fallback: if no text, extract a TRUNCATED thinking
+   summary (minimax via Ollama puts the whole answer in the reasoning channel
+   when thinking is omitted/disabled, leaving text empty). The summary is
+   capped at 240 chars to prevent the construct from ballooning and the
+   judge stage from re-reading megabytes of its own reasoning. */
 var txt='';
 try{var c=(msg&&msg.content)||[];for(var k=0;k<c.length;k++){var blk=c[k];if(blk.type==='text')txt+=blk.text;}}catch(_){}
-if(txt)return txt;
+if(txt&&txt.length>=30)return txt;
 var th='';
 try{var c2=(msg&&msg.content)||[];for(var k=0;k<c2.length;k++){var blk=c2[k];if(blk.type==='thinking'&&blk.thinking)th+=blk.thinking;}}catch(_){}
-return th;
+if(!th)return txt;
+th=th.replace(/\s+/g,' ').trim();
+if(th.length>240)th=th.slice(0,239)+'…';
+return txt?txt+' /*reasoning: '+th+'*/':th;
 }
 function __symStripMarker(msg){
 try{var MO=__symMOpen(),MC=__symMClose();var c=(msg&&msg.content)||[];
@@ -239,23 +244,31 @@ var mto=__symStageMaxTokens(body,B2out);if(mto!==undefined)ob.max_tokens=mto;
 if(body&&body.tools)ob.tools=body.tools;
 return ob;
 }
-async function __symDecider(client,body,feedback){
+async function __symDecider(client,body,feedback,traceArr){
 var s1body=__symDeciderBody(body,feedback);
 __symLog('[sym-decider] start deep='+__symDeep());
-var msg;
+var msg;var ts=__symNow();
 __symInStage=true;
-try{msg=await client.create(s1body);}catch(err){__symLog('[sym-decider] ERROR: '+err);return null;}finally{__symInStage=false;}
+try{msg=await client.create(s1body);}catch(err){__symLog('[sym-decider] ERROR: '+err);if(traceArr)traceArr.push({stage:'decider',depth:0,role:'decider',t0:ts,dt:__symMs(ts),ok:false,construct:'',model:(s1body&&s1body.model)||'',escalateRequest:null,blockInfo:{text:0,thinking:0,tool:0,other:0,thinkText:0},error:String(err)});return null;}finally{__symInStage=false;}
 var t=__symMessageText(msg);
 var bi=__symBlockInfo(msg);
 __symLog('[sym-decider] done len='+t.length+' blocks='+JSON.stringify(bi)+' txt='+JSON.stringify(t).slice(0,120));
+if(traceArr)traceArr.push({stage:'decider',depth:0,role:'decider',t0:ts,dt:__symMs(ts),ok:t.length>0,construct:t,model:(s1body&&s1body.model)||'',escalateRequest:null,blockInfo:bi});
 return t;
 }
-async function __symJudge(client,body,construct,depth){
+async function __symJudge(client,body,construct,depth,traceArr,escAlready){
 var jb=__symJudgeBody(body,construct,depth);
 __symLog('[sym-judge] start depth='+depth);
-var msg;
+var msg;var ts=__symNow();
 __symInStage=true;
-try{msg=await client.create(jb);}catch(err){__symLog('[sym-judge] ERROR: '+err);return null;}finally{__symInStage=false;}
+try{msg=await client.create(jb);}catch(err){__symLog('[sym-judge] ERROR: '+err);if(traceArr)traceArr.push({stage:'judge',depth:depth,role:'judge',t0:ts,dt:__symMs(ts),ok:false,construct:'',model:(jb&&jb.model)||'',escalateRequest:null,blockInfo:{text:0,thinking:0,tool:0,other:0,thinkText:0},error:String(err)});return null;}finally{__symInStage=false;}
+/* Push a judge skeleton immediately so the trace is append-only between stages.
+   __symRun's loop replaces this skeleton via trace.pop() + trace.push(judge real)
+   once it has parsed the message and decided esc vs. converged. The skeleton is
+   required: without it, trace.pop() would remove the previous stage's record
+   (e.g. the decider that produced the construct being judged) and the trace
+   would silently lose decider entries. */
+if(traceArr)traceArr.push({stage:'judge',depth:depth,role:'judge',t0:ts,dt:__symMs(ts),ok:true,construct:'',model:(jb&&jb.model)||'',escalateRequest:null,blockInfo:{text:0,thinking:0,tool:0,other:0,thinkText:0}});
 var txt=__symMessageText(msg);
 var bi=__symBlockInfo(msg);
 __symLog('[sym-judge] done depth='+depth+' blocks='+JSON.stringify(bi)+' txt='+JSON.stringify(txt).slice(0,120));
@@ -264,35 +277,239 @@ return msg;
 async function __symRun(client,body,t){
 var MAX=__symMaxEsc();var MO=__symMOpen();
 var t0=__symNow();
-var construct=await __symDecider(client,body,null);
-if(construct===null)return null;
+var trace=[];
+var construct=await __symDecider(client,body,null,trace);
+if(construct===null)return {response:null,request_id:null,data:null,__symTrace:trace};
 var finalConstruct='';
 var msg;
 for(var depth=0;depth<=MAX;depth++){
-msg=await __symJudge(client,body,construct,depth);
-if(msg===null)return null;
+msg=await __symJudge(client,body,construct,depth,trace,null);
+if(msg===null)return {response:null,request_id:null,data:null,__symTrace:trace};
 var txt=__symMessageText(msg);
 var esc=(txt.indexOf(MO)===0)?__symEscReq(txt):null;
+// Replace the last judge skeleton with the final record including escalateRequest + blockInfo + dt
+trace.pop();
+trace.push({stage:'judge',depth:depth,role:'judge',t0:trace[trace.length-1]?trace[trace.length-1].t0:__symNow(),dt:__symMs(t0),ok:true,construct:txt,model:((body&&body.model)||''),escalateRequest:esc,blockInfo:__symBlockInfo(msg)});
 __symLog('[sym] depth='+depth+' esc='+(esc!==null)+' dt='+__symMs(t0)+'ms');
-if(esc!==null&&depth<MAX){construct=await __symDecider(client,body,esc);if(construct===null)return null;continue;}
+if(esc!==null&&depth<MAX){construct=await __symDecider(client,body,esc,trace);if(construct===null)return {response:null,request_id:null,data:null,__symTrace:trace};continue;}
 if(esc!==null)__symStripMarker(msg);
 finalConstruct=__symMessageText(msg);
 break;
 }
-if(!finalConstruct)return null;
+if(!finalConstruct)return {response:null,request_id:null,data:null,__symTrace:trace};
 __symLog('[sym] final construct len='+finalConstruct.length+' dt='+__symMs(t0)+'ms');
 var ob=__symOutputBody(body,finalConstruct);
+trace.push({stage:'translator-init',depth:0,role:'translator',t0:__symNow(),dt:0,ok:true,construct:'',model:(ob&&ob.model)||'',escalateRequest:null,blockInfo:{text:0,thinking:0,tool:0,other:0,thinkText:0}});
 __symInStage=true;
 try{
 var p=client.create(ob,t);var wr=await p.withResponse();
 __symLog('[sym] translator stream ready dt='+__symMs(t0)+'ms');
-return {response:wr.response,request_id:wr.request_id,data:wr.data};
+return {response:wr.response,request_id:wr.request_id,data:wr.data,__symTrace:trace};
 }
-catch(err){__symLog('[sym] translator ERROR: '+err);return null;}
+catch(err){__symLog('[sym] translator ERROR: '+err);return {response:null,request_id:null,data:null,__symTrace:trace};}
 finally{__symInStage=false;}
 }
 function __symNow(){try{return Date.now();}catch(_){return 0;}}
 function __symMs(t0){var n=__symNow();return (n&&t0)?(n-t0):0;}
+function __symFirstLine(s,max){
+/* Whitespace-collapse, first line only, truncate. Used by the trace formatter
+   to make per-stage summaries one-liners without agent help. */
+try{var t=(s||'').replace(/\s+/g,' ').trim();var i=t.indexOf('\n');if(i>=0)t=t.slice(0,i);if(t.length>max)t=t.slice(0,max-1)+'…';return t||'(empty)';}catch(_){return '(empty)';}
+}
+function __symFormatTrace(trace){
+/* Algorithmic formatter for the Decider<->Judge escalation trace. No agent
+   roundtrip, no model call. Produces a multi-line plain-text summary of the
+   captured stage records (decider / judge / translator-init), suitable for
+   splitting into thinking_delta chunks. */
+try{
+var lines=[];
+var started=trace.length>0?trace[0].t0:0;
+var anyOk=false;
+for(var i=0;i<trace.length;i++){var r=trace[i];if(r&&r.ok)anyOk=true;}
+if(!anyOk&&trace.length===1&&trace[0].error){
+/* Failure shortcut: short single-line so the user sees what went wrong. */
+lines.push('cc-symbolic reasoning failed; falling back to direct response.');
+lines.push('error: '+__symFirstLine(trace[0].error,200));
+return lines.join('\n');
+}
+lines.push('cc-symbolic reasoning trace (3-stage)');
+lines.push('=====================================');
+for(var i=0;i<trace.length;i++){
+var r=trace[i];
+if(!r)continue;
+var t=started?((r.t0-started)/1000).toFixed(2)+'s':'?s';
+var dt=r.dt+'ms';
+if(r.stage==='decider'){
+lines.push('');
+lines.push('[+0.00s] DECIDER (model='+r.model+')');
+lines.push('        '+dt+'  '+(r.ok?'ok':'FAIL'));
+if(r.construct)lines.push('        '+__symFirstLine(r.construct,140));
+}else if(r.stage==='judge'){
+lines.push('');
+lines.push('[+'+t+'] JUDGE depth='+r.depth+' (model='+r.model+')');
+lines.push('        '+dt+'  '+(r.ok?'ok':'FAIL'));
+if(r.escalateRequest){lines.push('        ESCALATE: '+__symFirstLine(r.escalateRequest,140));}
+else if(r.construct){lines.push('        '+__symFirstLine(r.construct,140));}
+}else if(r.stage==='translator-init'){
+lines.push('');
+lines.push('[+'+t+'] TRANSLATOR (model='+r.model+') streaming ->');
+}
+}
+lines.push('');
+return lines.join('\n');
+}catch(_){return 'cc-symbolic trace formatter error';}
+}
+function __symChunkText(text,max){
+/* Split text into chunks of <= max chars at whitespace boundaries so each
+   thinking_delta event looks like streaming. Falls back to hard slice if no
+   whitespace is found within the window. */
+try{
+var out=[];
+var s=String(text||'');
+while(s.length>max){
+var cut=s.lastIndexOf(' ',max);
+if(cut<=0)cut=max;
+out.push(s.slice(0,cut));
+s=s.slice(cut).replace(/^\s+/,'');
+}
+if(s.length)out.push(s);
+return out;
+}catch(_){return [String(text||'')];}
+}
+function __symBuildThinkingWrapper(trace,upstream,signal){
+/* Build an AsyncIterable wrapper that prepends a synthetic thinking block
+   containing the algorithmic Decider<->Judge trace, then forwards the
+   upstream translator stream. The engine's vui dispatcher
+   (cli.pretty.js:19310) renders thinking_delta events via the same path
+   used for API-side extended thinking, so the trace shows up under Ctrl+O
+   (app:toggleTranscript) without any TUI changes. The wrapper exposes
+   .controller.signal and .controller.abort() so the engine's
+   s.controller.signal?.aborted check (cli.pretty.js:19203) works. */
+try{
+if(!upstream)return upstream;
+if(!trace||!trace.length)return upstream;
+if(process.env.symbolic_thinking_trace!=='1')return upstream;
+/* Skip wrapper if the trace already has rich thinking (deep mode emits its
+   own thinking blocks; emitting a duplicate summary would be noise). */
+for(var i=0;i<trace.length;i++){var r=trace[i];if(r&&r.blockInfo&&r.blockInfo.thinking>0&&r.blockInfo.thinkText>0)return upstream;}
+var formatted=__symFormatTrace(trace);
+/* Cap the trace so a runaway escalation loop cannot flood the TUI. */
+var capBytes=32*1024;
+if(formatted.length>capBytes){
+formatted=formatted.slice(0,capBytes)+'\n\n(trace truncated for display; full trace in /tmp/ts.log)';
+}
+var chunks=__symChunkText(formatted,256);
+/* Build the synthetic message object (mirrors Anthropic Message shape so the
+   engine's reducer (cli.pretty.js:19371) accepts it). */
+var mid='msg_sym_'+(__symNow().toString(16))+'_'+Math.floor(Math.random()*0xffffff).toString(16);
+var modelId=(trace[0]&&trace[0].model)||'cc-symbolic';
+var controller={signal:signal||new AbortController().signal};
+var aborted=false;
+var iter=null; /* lazily resolved on first iteration */
+function getIter(){
+if(!iter)iter=upstream[Symbol.asyncIterator]();
+return iter;
+}
+controller.abort=function(){
+aborted=true;
+try{getIter().return&&getIter().return();}catch(_){}
+try{if(upstream.controller&&upstream.controller.abort)upstream.controller.abort();}catch(_){}
+};
+async function* gen(){
+/* Index remap: our synthetic thinking block occupies index 0 (and its delta/stop
+   events use index 0). The upstream's content blocks have their own indices
+   (often 0,1,2,... for text/tool_use/thinking). The engine's reducer
+   (cli.pretty.js:19371) at content_block_start does r.content.push() (order =
+   arrival order) and at content_block_delta does r.content.at(t.index) — so the
+   event's index field MUST match the array position of the corresponding
+   content_block_start. We allocate nextLocalIdx=1 for the first upstream block
+   and remap every subsequent upstream content_* event's index via idxMap. */
+var idxMap={};
+var nextLocalIdx=1;
+/* 1) message_start */
+yield {type:'message_start',message:{id:mid,type:'message',role:'assistant',model:modelId,content:[],stop_reason:null,stop_sequence:null,usage:{input_tokens:0,output_tokens:0,cache_creation_input_tokens:0,cache_read_input_tokens:0,server_tool_use:null,iterations:null}}};
+/* 2) content_block_start: thinking at index 0 */
+yield {type:'content_block_start',index:0,content_block:{type:'thinking',thinking:''}};
+/* 3) thinking_delta chunks */
+for(var k=0;k<chunks.length;k++){
+if(aborted)return upstream;
+yield {type:'content_block_delta',index:0,delta:{type:'thinking_delta',thinking:chunks[k]}};
+}
+/* 4) content_block_stop: thinking */
+yield {type:'content_block_stop',index:0};
+/* 5) Forward upstream events. Drop the first event (the translator's own
+   message_start) to keep the engine's reducer happy (otherwise the reducer
+   throws "Unexpected event order, got message_start before message_stop"
+   because we already opened a message). Remap upstream content_* indices so
+   they don't collide with our thinking at index 0. Suppress translator-
+   emitted thinking blocks (deep mode) by index. Pass-through other events
+   (message_delta, message_stop, ping, etc.) unchanged. */
+var it=getIter();
+var first=true;
+var suppressIdx=-1;
+while(true){
+var r=await it.next();
+if(r.done)break;
+var ev=r.value;
+if(!ev)continue;
+if(first){first=false;continue;}
+/* Remap content_* events that carry an index. If we've already seen a
+   content_block_start for this upstream index, reuse the mapped local index;
+   otherwise we have an orphan delta/stop (rare; happens if upstream emits a
+   delta before its start) — allocate a fresh local slot. */
+if(ev.type==='content_block_start'){
+/* Suppress translator-emitted thinking blocks (deep-mode): remember the
+   upstream index so we drop its delta/stop. */
+if(ev.content_block&&ev.content_block.type==='thinking'){
+suppressIdx=ev.index;
+continue;
+}
+var ui=ev.index;
+if(idxMap[ui]===undefined){idxMap[ui]=nextLocalIdx++;}
+yield {type:'content_block_start',index:idxMap[ui],content_block:ev.content_block};
+continue;
+}
+if(ev.type==='content_block_delta'||ev.type==='content_block_stop'){
+if(suppressIdx>=0&&ev.index===suppressIdx)continue;
+var ui2=ev.index;
+if(idxMap[ui2]===undefined)idxMap[ui2]=nextLocalIdx++;
+yield {type:ev.type,index:idxMap[ui2],delta:ev.delta};
+continue;
+}
+/* message_delta / message_stop / ping / etc. — pass-through verbatim. */
+yield ev;
+}
+/* Return upstream so the engine's terminal "controller" in Ti.value check
+   (cli.pretty.js:407773) finds .controller on the value. Without this, the
+   async generator would yield value:undefined on done:true and the in-check
+   would throw "Ti.value is not an Object (evaluating 'controller' in Ti.value)".
+   The upstream (MessageStream) carries .controller exactly like xbo's terminal
+   return at cli.pretty.js:492207. Fall back to our local controller if
+   upstream is unexpectedly missing. */
+return upstream || controller;
+}
+return {
+controller:controller,
+[Symbol.asyncIterator]:function(){return gen();}
+};
+}catch(_){return upstream;}
+}
+function __symStripModelFlag(arr,e,t){
+/* Filter --model <value> pairs from a respawnFlags array. Called as
+   __symStripModelFlag(o.respawnFlags ?? [], e, t) where (e, t) is the
+   candidate pair to append. We never persist a hardcoded --model:
+   the respawned bg session must re-read OPUS_MODEL/SONNET_MODEL/HAIKU_MODEL
+   from env so the user can change tiers without re-spawning. */
+try{
+  var out=[];
+  for(var i=0;i<arr.length;i++){
+    if(arr[i]==='--model'){i++;continue;}
+    out.push(arr[i]);
+  }
+  if(e!=='--model'){out.push(e);if(t!==undefined)out.push(t);}
+  return out;
+}catch(_){return arr;}
+}
 """
 
 HELPER = ascii_escape_js(HELPER_HEAD.replace(
@@ -307,6 +524,17 @@ HOOKA_BASE_NEEDLE = (
     'return this._client.post("/v1/messages?beta=true",{body:o,timeout:i??600000,'
     '...t,headers:ns([{...n?.toString()!=null?{"anthropic-beta":n?.toString()}:void 0},'
     's,t?.headers]),stream:r.stream??!1})'
+)
+
+# PATCH 2026-07-20 (background respawn): strip --model from respawnFlags so the
+# respawned bg session re-reads OPUS_MODEL/SONNET_MODEL/HAIKU_MODEL/SUBAGENT_MODEL
+# from the env, instead of being locked to whatever model the user happened to
+# invoke with the first time. Without this, running `cc-symbolic agents` once
+# with --model X pins X forever in ~/.claude/jobs/<sid>/state.json respawnFlags,
+# and every later respawn ignores env-tier changes (the deepseek-v4-pro stickiness
+# bug). We only strip the model flag; all other respawn flags stay intact.
+RESPAWN_NEEDLE = (
+    'respawnFlags:[...o.respawnFlags??[],e,t],'
 )
 HOOKA_BETA_NEEDLE = (
     'return this._client.post("/v1/messages",{body:e,timeout:r??600000,'
@@ -327,10 +555,14 @@ def hooka_repl(orig_post: str, body_var: str, stream_expr: str) -> str:
         "__symLog('[ha] stream='+(" + stream_expr + ")+' model='+((" + body_var + "&&" + body_var + ".model)||'')+' th='+JSON.stringify(" + body_var + "&&" + body_var + ".thinking)+' tr='+__symTrigger(" + body_var + "));"
         "if(__symTrigger(" + body_var + ")){var __s=this;__symLog('[ha-sym] symbolic 3-stage');"
         "return{withResponse:function(){return(async()=>{"
-        "try{var r=await __symRun(__s," + body_var + ",t);if(r)return r;}"
-        "catch(err){__symLog('[ha-sym] ERROR: '+err);}"
+        "try{var r=await __symRun(__s," + body_var + ",t);"
+        "if(r&&r.data){return{response:r.response,request_id:r.request_id,data:__symBuildThinkingWrapper(r.__symTrace,r.data,t&&t.signal)};}"
+        "if(r&&r.__symTrace){return{response:r.response,request_id:r.request_id,data:__symBuildThinkingWrapper(r.__symTrace,null,t&&t.signal)};}"
+        "}catch(err){__symLog('[ha-sym] ERROR: '+err);}"
         "__symLog('[ha-sym] fallback to stock stream');"
-        "__symInStage=true;try{var fp=__s.create(Object.assign({}," + body_var + ",{stream:true}),t);return await fp.withResponse();}finally{__symInStage=false;}"
+        "__symInStage=true;try{var fp=__s.create(Object.assign({}," + body_var + ",{stream:true}),t);"
+        "return(await fp.withResponse()).then(function(fb){return{response:fb.response,request_id:fb.request_id,data:__symBuildThinkingWrapper([{stage:'decider',depth:0,role:'decider',t0:__symNow(),dt:0,ok:false,construct:'',model:'',escalateRequest:null,blockInfo:{text:0,thinking:0,tool:0,other:0,thinkText:0},error:'fallback to stock stream after symbolic-run failure'}],fb.data,t&&t.signal)};});"
+        "}finally{__symInStage=false;}"
         "})();}};}"
         + orig_post
     )
@@ -339,6 +571,15 @@ def hooka_repl(orig_post: str, body_var: str, stream_expr: str) -> str:
 IIFE_REPL = IIFE_NEEDLE + HELPER
 HOOKA_BASE_REPL = hooka_repl(HOOKA_BASE_NEEDLE, "o", "r.stream")
 HOOKA_BETA_REPL = hooka_repl(HOOKA_BETA_NEEDLE, "e", "e.stream")
+
+# Filter --model out of respawnFlags before persisting. Single --model flag
+# spans two array entries (["--model", "<value>"]), so we walk the existing
+# list and the incoming pair together and rebuild without any "--model"
+# entry. Result: bg respawn always re-reads OPUS_MODEL/SONNET_MODEL/HAIKU_MODEL
+# from env, never the stale model from the first bg-spawn.
+RESPAWN_REPL = (
+    'respawnFlags: __symStripModelFlag(o.respawnFlags ?? [], e, t),'
+)
 
 
 def main() -> None:
@@ -349,6 +590,8 @@ def main() -> None:
          "note": "Hook A base: Messages.create symbolic 3-stage"},
         {"needle": b64(HOOKA_BETA_NEEDLE), "replacement": b64(HOOKA_BETA_REPL),
          "note": "Hook A beta: BetaMessages.create symbolic 3-stage"},
+        {"needle": b64(RESPAWN_NEEDLE), "replacement": b64(RESPAWN_REPL),
+         "note": "Hook C: strip --model from bg respawnFlags (env-tiers win)"},
     ]
     with open("patches.json", "w") as f:
         json.dump(patches, f, indent=2)
