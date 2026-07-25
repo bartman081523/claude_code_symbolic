@@ -579,7 +579,8 @@ def hooka_repl(orig_post: str, body_var: str, stream_expr: str) -> str:
         "}catch(err){__symLog('[ha-sym] ERROR: '+err);}"
         "__symLog('[ha-sym] fallback to stock stream');"
         "__symInStage=true;try{var fp=__s.create(Object.assign({}," + body_var + ",{stream:true}),t);"
-        "return(await fp.withResponse()).then(function(fb){return{response:fb.response,request_id:fb.request_id,data:__symBuildThinkingWrapper([{stage:'decider',depth:0,role:'decider',t0:__symNow(),dt:0,ok:false,construct:'',model:'',escalateRequest:null,blockInfo:{text:0,thinking:0,tool:0,other:0,thinkText:0},error:'fallback to stock stream after symbolic-run failure'}],fb.data,t&&t.signal)};});"
+        "var fb=await fp.withResponse();"
+        "return{response:fb.response,request_id:fb.request_id,data:__symBuildThinkingWrapper([{stage:'decider',depth:0,role:'decider',t0:__symNow(),dt:0,ok:false,construct:'',model:'',escalateRequest:null,blockInfo:{text:0,thinking:0,tool:0,other:0,thinkText:0},error:'fallback to stock stream after symbolic-run failure'}],fb.data,t&&t.signal)};"
         "}finally{__symInStage=false;}"
         "})();}};}"
         + orig_post
