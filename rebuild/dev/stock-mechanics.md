@@ -68,9 +68,21 @@ let Rs = {
 | Streaming call | :407632 | the real HTTP exit |
 | Per-turn loop | inner `while(gn)` :383904 | tool_use→tool_result iteration |
 
-## 7. Streaming / visible-vs-hidden / tool-loop — (pending agents 2 & 3)
+## 7. Streaming + visible-vs-hidden (agent 2)
 
-To be filled: SDK Stream (v7/uLr) consumer shape, text/thinking/tool_use delta
-dispatch, what reaches the visible text channel vs thinking (hidden?),
-whether a stream wrapper is safe (the prior Spread-crash risk), tool_use
-assembly + tool_result feedback, history accumulation (is thinking preserved?).
+- **Stream consumer**: `aad` async generator :406849, loop `for await (let zo of SSy(qe, Rn))` :407849. `qe` = SDK `MessageStream` (class `v7` :17610). `SSy` :407748 is a watchdog wrapper (`yield* e` + ping). Discriminator raw-vs-wrapper: `!("controller" in Ti.value)` :407773.
+- **Delta dispatch** :408010-408058 into `Qe[zo.index]`: `text_delta`→`lr.text`, `thinking_delta`→`lr.thinking`, `input_json_delta`→`lr.input` (string), `signature_delta`→`lr.signature`.
+- **Per-block yield** :408097: on `content_block_stop`, accumulated block → `{type:"assistant", message:{...content:[lr]}}` → `yield nn`. This per-block `assistant` event is the unit of UI delivery.
+- **VISIBLE = `text` blocks only.** `Out(e)` :489768 dispatches: `assistant`→`displayTransform.entryLanded(e)` (visible Ink text) + `onStreamingText` (live text deltas via `Qx.apply`). `ols` :489855: `text_delta`→`onStreamingText` (LIVE to terminal); `thinking_delta`→only `onApiMetrics("thinking_progress")` (token pill, NOT visible text).
+- **Thinking IS shown** briefly: post-stream snapshot into React state `ef` :749641, auto-cleared after 30s. To make thinking FULLY invisible: `thinking:{type:"enabled",display:"omitted"}` (API returns `redacted_thinking` only) OR strip thinking text from the yielded `assistant.message.content` before `Out`.
+- **Stream identity**: raw SDK `v7` (has `.controller`, `[Symbol.asyncIterator]`). Wrapping is RISKY (the prior Spread-crash + has-trap came from this). **→ Avoid wrapping; prevent leakage at the source (clean system, no notation preamble) instead of filtering the stream.** This is the basis of the translator reframe.
+- **Tool_use assembly**: `input_json_delta` fragments → string `lr.input` → parsed at consumer. Final tool_use list = filter `message.content` for `type==="tool_use"`.
+
+## 8. Tool-use loop + history (agent 3)
+
+- **Turn termination**: `itd` :383499, single `while(!0)` :383541. `Lr = Er?.message.stop_reason ?? Dt` :385068. `tool_use`→execute+continue; `end_turn`→done (with a "thinking-only nudge" :385069-385094 if no text — injects meta "produce a user-visible response" + continues). Terminal `return {reason:"completed"}` :385161.
+- **Tool extraction** :384554-384561: `z.message.content.filter(type==="tool_use")` → `Fe` → `Ft.addTool(Ke,z)` (`P6e` executor :378550, instantiated :383711). `P6e.executeTool` :378744 → `F9r` :354270 → `xny` :354521 (switch: hooks, validation, **permission pipeline**, `e.handler(...)`).
+- **Tool_result** = `Ur({content:[{type:"tool_result",content,is_error,tool_use_id}]})` user message (factory `Ur` :488081). Collected into `at` via `Ft.getRemainingResults()` :385167-385184.
+- **Permission gating**: `dYr` :331100 (decider) → `i6e` :372692 (read-only bypass) → `Lat` :373150 (rules) → `canUseTool` callback; `MVt` :60591 maps mode→behavior; `--dangerously-skip-permissions` → `"bypassPermissions"` → unconditional allow.
+- **History** :385433-385448: `g.messages = [...Re, ...ot, ...at]` — assistant turn (`ot`, **thinking + tool_use blocks PRESERVED**, only stripped on server rejection :407750) + tool_result user msgs (`at`). Invariant: assistant-msg → tool_result-user-msg 1:1 on `tool_use_id`.
+- **→ Docking confirmed**: the translator's streamed response IS the assistant turn; its `text` blocks → visible, its `tool_use` blocks → stock `P6e` executor (native). So a clean-system translator that emits normal text + tool_use works with zero tool-loop changes.

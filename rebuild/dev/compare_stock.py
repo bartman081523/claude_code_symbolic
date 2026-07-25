@@ -70,7 +70,7 @@ def run_one(label, cmd, force_model=None):
 def main():
     if not STOCK:
         print("stock claude not on PATH"); sys.exit(2)
-    MODEL = "minimax-m3:cloud"  # same model for both -> apples-to-apples
+    MODEL = "glm-5.2:cloud"  # same model for both -> apples-to-apples
     print(f"=== symbolic (cc-symbolic, 3-stage, model={MODEL}) ===")
     s = run_one("symbolic", [str(CC_SYM), "ollama"], force_model=MODEL)
     print(f"  rc={s['rc']} dt={s['dt']:.0f}s reqs={s['reqs']} in={s['in']} out={s['out']} correct={s['correct']}")
