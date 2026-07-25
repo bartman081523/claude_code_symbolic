@@ -456,6 +456,84 @@ console.log('\nTEST 13: HARD regression — engine reducer simulation preserves 
      'actual: ' + JSON.stringify(r.content.map(b => ({ type: b.type, text: b.text, thinking: b.thinking }))));
 }
 
+// =================================================================
+// Regression: a symbolic stage that errors (e.g. a multi-image body
+// that exceeds the Ollama-Cloud 16 MB transport limit) makes __symRun
+// return {data: null}. Hook A passes null as upstream to
+// __symBuildThinkingWrapper. BEFORE the fix, the wrapper returned null
+// (trace=0) or a bare non-iterable (trace=1), and the engine crashed with
+// "Ti.value is not an Object (evaluating 'controller' in Ti.value)".
+// AFTER the fix, the wrapper returns __symEmptyStream(signal): a
+// controller-bearing async-iterable that yields nothing, so the engine's
+// "controller" in Ti.value check passes and the follow-up for-await
+// (SSy(qe)) iterates an empty stream instead of crashing.
+// =================================================================
+console.log('\nTEST 14: __symEmptyStream — controller-bearing empty iterable');
+{
+  const es = H.__symEmptyStream(undefined);
+  ok('returns an object (not null)', es && typeof es === 'object');
+  ok('has .controller', es && 'controller' in es);
+  ok('controller has .signal', es && es.controller && 'signal' in es.controller);
+  ok('controller has .abort', es && es.controller && typeof es.controller.abort === 'function');
+  ok('is async-iterable', es && typeof es[Symbol.asyncIterator] === 'function');
+  // iterate — must yield nothing and end cleanly
+  const out = [];
+  for await (const zo of es) out.push(zo);
+  ok('empty stream yields nothing', out.length === 0);
+}
+
+console.log('\nTEST 15: wrapper with null upstream returns empty stream (no crash) — trace=0');
+delete process.env.symbolic_thinking_trace;
+{
+  const w = H.__symBuildThinkingWrapper([], null, null);
+  ok('trace=0 + null upstream -> NOT null (regression: was null -> engine crash)', w !== null && w !== undefined);
+  ok('has .controller', w && 'controller' in w);
+  ok('is async-iterable', w && typeof w[Symbol.asyncIterator] === 'function');
+  // Simulate the engine: xbo terminal = w, then for-await SSy(w) (Rn falsy -> yield*w)
+  let threw = null;
+  let qe = w;
+  try {
+    // engine check: "controller" in Ti.value
+    const controllerPresent = 'controller' in qe;
+    ok('engine "controller" in terminal -> true (no throw)', controllerPresent === true);
+    // engine follow-up: for await (let zo of SSy(qe, undefined)) ~ for await (let zo of qe)
+    const out = [];
+    for await (const zo of qe) out.push(zo);
+    ok('engine for-await over empty stream completes, yields nothing', out.length === 0);
+  } catch (e) {
+    threw = e;
+    ok('engine for-await over empty stream completes, yields nothing', false, 'threw: ' + e.message);
+  }
+  ok('no exception in engine simulation', threw === null);
+}
+
+console.log('\nTEST 16: wrapper with null upstream returns empty stream (no crash) — trace=1');
+process.env.symbolic_thinking_trace = '1';
+{
+  const traceErr = [{ stage:'decider', depth:0, role:'decider', t0:0, dt:0, ok:false,
+    construct:'', model:'minimax-m3:cloud', escalateRequest:null,
+    blockInfo:{text:0,thinking:0,tool:0,other:0,thinkText:0}, error:'stage failed' }];
+  const w = H.__symBuildThinkingWrapper(traceErr, null, null);
+  ok('trace=1 + null upstream -> NOT null (regression: was null via catch -> crash)', w !== null && w !== undefined);
+  ok('has .controller', w && 'controller' in w);
+  ok('is async-iterable', w && typeof w[Symbol.asyncIterator] === 'function');
+  let threw = null;
+  try {
+    const out = [];
+    for await (const zo of w) out.push(zo);
+    // The `if(!upstream)return __symEmptyStream(signal)` gate fires BEFORE
+    // the trace-build, so a null upstream yields an empty stream regardless
+    // of trace=1. (The error trace is instead surfaced via the Hook-A stock
+    // fallback path, which passes a real stream + an error trace record.)
+    ok('trace=1 + null upstream -> empty stream (gate fires before trace build)', out.length === 0);
+  } catch (e) {
+    threw = e;
+    ok('trace=1 wrapper iteration completes', false, 'threw: ' + e.message);
+  }
+  ok('no exception in trace=1 engine simulation', threw === null);
+}
+delete process.env.symbolic_thinking_trace;
+
 console.log(`\nRESULT: ${pass} pass, ${fail} fail`);
 process.exit(fail ? 1 : 0);
 } catch (err) {

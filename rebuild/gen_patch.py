@@ -376,6 +376,24 @@ if(s.length)out.push(s);
 return out;
 }catch(_){return [String(text||'')];}
 }
+function __symEmptyStream(signal){
+/* A minimal controller-bearing AsyncIterable that yields nothing. Returned
+   by __symBuildThinkingWrapper when upstream is null/missing (a symbolic
+   stage errored and produced no translator stream). The engine's consumer
+   loop (cli.pretty.js:407773) does `!("controller" in Ti.value)` on the
+   xbo terminal, and the follow-up `for await(let zo of SSy(qe, Rn))`
+   iterates `qe` directly when Rn is falsy (response is null on stage
+   error). So the object MUST (a) carry a `.controller` AbortController so
+   the in-check passes and the engine's s.controller.signal?.aborted check
+   (cli.pretty.js:19203) works, and (b) be async-iterable so SSy(qe) doesn't
+   throw. Returning `null` here crashes the engine with
+   "Ti.value is not an Object (evaluating 'controller' in Ti.value)" — the
+   exact regression seen with multi-image bodies that exceed the
+   Ollama-Cloud 16 MB transport limit and make every symbolic stage fail. */
+var c=new AbortController();
+if(signal){try{signal.addEventListener('abort',function(){c.abort();});}catch(_){}}
+return {controller:c,[Symbol.asyncIterator]:function(){return {next:function(){return Promise.resolve({value:undefined,done:true});},return:function(){return Promise.resolve({value:undefined,done:true});}};}};
+}
 function __symBuildThinkingWrapper(trace,upstream,signal){
 /* Build an AsyncIterable wrapper that prepends a synthetic thinking block
    containing the algorithmic Decider<->Judge trace, then forwards the
@@ -386,7 +404,7 @@ function __symBuildThinkingWrapper(trace,upstream,signal){
    .controller.signal and .controller.abort() so the engine's
    s.controller.signal?.aborted check (cli.pretty.js:19203) works. */
 try{
-if(!upstream)return upstream;
+if(!upstream)return __symEmptyStream(signal);
 if(!trace||!trace.length)return upstream;
 if(process.env.symbolic_thinking_trace!=='1')return upstream;
 /* Skip wrapper if the trace already has rich thinking (deep mode emits its
@@ -557,7 +575,7 @@ def hooka_repl(orig_post: str, body_var: str, stream_expr: str) -> str:
         "return{withResponse:function(){return(async()=>{"
         "try{var r=await __symRun(__s," + body_var + ",t);"
         "if(r&&r.data){return{response:r.response,request_id:r.request_id,data:__symBuildThinkingWrapper(r.__symTrace,r.data,t&&t.signal)};}"
-        "if(r&&r.__symTrace){return{response:r.response,request_id:r.request_id,data:__symBuildThinkingWrapper(r.__symTrace,null,t&&t.signal)};}"
+        "if(r&&r.__symTrace){__symLog('[ha-sym] stage error (data null) -> stock fallback, original body (images preserved) forwarded');}"
         "}catch(err){__symLog('[ha-sym] ERROR: '+err);}"
         "__symLog('[ha-sym] fallback to stock stream');"
         "__symInStage=true;try{var fp=__s.create(Object.assign({}," + body_var + ",{stream:true}),t);"
