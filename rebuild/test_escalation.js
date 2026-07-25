@@ -483,6 +483,101 @@ ok('decider error: trace record is the decider', rErr.__symTrace[0].stage === 'd
 ok('decider error: trace record has error', /decider 500/.test(rErr.__symTrace[0].error));
 ok('decider error: trace record ok=false', rErr.__symTrace[0].ok === false);
 
+// =========================================================================
+// TEST 16: __symTierModel — env tier lookup with fallback
+// =========================================================================
+console.log('\nTEST 16: __symTierModel — env tier lookup with fallback');
+delete process.env.OPUS_MODEL; delete process.env.SONNET_MODEL; delete process.env.HAIKU_MODEL;
+ok('unknown tier -> fallback',      H.__symTierModel('foo', 'fb') === 'fb');
+ok('opus tier, no env -> fallback',H.__symTierModel('opus', 'fb-opus') === 'fb-opus');
+ok('sonnet tier, no env -> fallback',H.__symTierModel('sonnet', 'fb-sonnet') === 'fb-sonnet');
+ok('haiku tier, no env -> fallback',H.__symTierModel('haiku', 'fb-haiku') === 'fb-haiku');
+process.env.OPUS_MODEL = 'o'; process.env.SONNET_MODEL = 's'; process.env.HAIKU_MODEL = 'h';
+ok('opus tier with env',  H.__symTierModel('opus', 'x') === 'o');
+ok('sonnet tier with env',H.__symTierModel('sonnet', 'x') === 's');
+ok('haiku tier with env', H.__symTierModel('haiku', 'x') === 'h');
+delete process.env.OPUS_MODEL; delete process.env.SONNET_MODEL; delete process.env.HAIKU_MODEL;
+process.env.OPUS_MODEL = 'opus-mock'; process.env.SONNET_MODEL = 'sonnet-mock'; process.env.HAIKU_MODEL = 'haiku-mock';  // restore for later tests
+
+// =========================================================================
+// TEST 17: __symStripModelFlag — drop --model pairs (respawnFlags dedup)
+// =========================================================================
+console.log('\nTEST 17: __symStripModelFlag — drops --model pairs');
+ok('empty arr + non-model pair -> [foo,bar]',       JSON.stringify(H.__symStripModelFlag([], 'foo', 'bar')) === '["foo","bar"]');
+ok('arr with --model x + e==--model -> x dropped, NO new --model appended',JSON.stringify(H.__symStripModelFlag(['a','b'], '--model', 'claude-opus')) === '["a","b"]');
+ok('arr with --model x -> x dropped',                JSON.stringify(H.__symStripModelFlag(['--model','claude-opus','rest'], 'whatever','val')) === '["rest","whatever","val"]');
+ok('multiple --model dropped',                       JSON.stringify(H.__symStripModelFlag(['--model','a','--model','b','keep'], '--debug','on')) === '["keep","--debug","on"]');
+ok('arr with --model + non-model pair -> model dropped, pair appended',JSON.stringify(H.__symStripModelFlag(['--model','old'], '--debug', true)) === '["--debug",true]');
+ok('appending --model directly via (e,t) is suppressed (e==--model -> no push)',JSON.stringify(H.__symStripModelFlag(['keep'], '--model', 'new')) === '["keep"]');
+ok('appending --model with no t is suppressed',      JSON.stringify(H.__symStripModelFlag(['keep'], '--model', undefined)) === '["keep"]');
+ok('non-model pair without t -> just e pushed',     JSON.stringify(H.__symStripModelFlag(['keep'], '--verbose', undefined)) === '["keep","--verbose"]');
+
+// =========================================================================
+// TEST 18: __symIsCloud — backend detection for thinking-ignore behavior
+// =========================================================================
+console.log('\nTEST 18: __symIsCloud — backend detection');
+ok('empty model -> false',           H.__symIsCloud('') === false);
+ok('null model -> false',            H.__symIsCloud(null) === false);
+ok('undefined model -> false',       H.__symIsCloud(undefined) === false);
+ok('real anthropic model -> false',  H.__symIsCloud('claude-opus-4-8') === false);
+ok('minimax-m3:cloud -> true',       H.__symIsCloud('minimax-m3:cloud') === true);
+ok('glm-5.2:cloud -> true',          H.__symIsCloud('glm-5.2:cloud') === true);
+delete process.env.ANTHROPIC_BASE_URL;
+ok('plain model with no base URL -> false', H.__symIsCloud('claude-haiku') === false);
+process.env.ANTHROPIC_BASE_URL = 'http://localhost:11434/ollama';
+ok('ollama base URL triggers cloud path', H.__symIsCloud('claude-haiku') === true);
+process.env.ANTHROPIC_BASE_URL = 'https://api.anthropic.com';
+ok('official base URL -> not cloud (for claude-haiku)', H.__symIsCloud('claude-haiku') === false);
+delete process.env.ANTHROPIC_BASE_URL;
+
+// =========================================================================
+// TEST 19: __symStageMaxTokens — cap cloud-fallback max_tokens
+// =========================================================================
+console.log('\nTEST 19: __symStageMaxTokens — cloud fallback budget cap');
+ok('real anthropic model -> undefined (no cap)',H.__symStageMaxTokens({model:'claude-opus-4-8'}, 1500) === undefined);
+ok('minimax cloud model with budget -> returns budget',H.__symStageMaxTokens({model:'minimax-m3:cloud'}, 1500) === 1500);
+ok('glm cloud model with budget -> returns budget',H.__symStageMaxTokens({model:'glm-5.2:cloud'}, '3000') === 3000);
+ok('cloud model, zero budget -> undefined (no cap applied)',H.__symStageMaxTokens({model:'minimax-m3:cloud'}, 0) === undefined);
+ok('cloud model, NaN budget -> undefined', H.__symStageMaxTokens({model:'minimax-m3:cloud'}, 'abc') === undefined);
+ok('null body -> undefined', H.__symStageMaxTokens(null, 1500) === undefined);
+
+// =========================================================================
+// TEST 20: __symBuildThinkingWrapper — deep-mode passthrough (no summary
+// if trace already has rich thinking blocks, e.g. upstream emitted them
+// directly because symbolic_thinking_deep=1).
+// =========================================================================
+console.log('\nTEST 20: __symBuildThinkingWrapper — deep-mode passthrough');
+process.env.symbolic_thinking_trace = '1';
+// trace with a stage that has thinking>0 and thinkText>0 (simulating deep mode)
+const TRACE_DEEP = [
+  { stage:'decider', depth:0, role:'decider', t0:0, dt:100, ok:true,
+    construct:'x', model:'minimax-m3:cloud', escalateRequest:null,
+    blockInfo:{text:0, thinking:1, tool:0, other:0, thinkText:50} },
+];
+const upstreamDeep = {
+  [Symbol.asyncIterator]() { return { next: async () => ({value:undefined,done:true}), return: async () => ({value:undefined,done:true}) }; },
+  controller: { signal: new AbortController().signal, abort: () => {} },
+};
+const wrapDeep = H.__symBuildThinkingWrapper(TRACE_DEEP, upstreamDeep, null);
+ok('deep-mode trace: wrapper returns upstream unchanged (=== upstream)', wrapDeep === upstreamDeep);
+// and trace=0 -> off
+process.env.symbolic_thinking_trace = '0';
+const wrapOff = H.__symBuildThinkingWrapper([], upstreamDeep, null);
+ok('trace=0: wrapper returns upstream unchanged', wrapOff === upstreamDeep);
+process.env.symbolic_thinking_trace = '1';
+// trace without thinking blocks -> wrapper DOES wrap (not passthrough)
+const TRACE_FLAT = [
+  { stage:'decider', depth:0, role:'decider', t0:0, dt:100, ok:true,
+    construct:'x', model:'opus-mock', escalateRequest:null,
+    blockInfo:{text:1, thinking:0, tool:0, other:0, thinkText:0} },
+];
+const upstreamFlat = {
+  [Symbol.asyncIterator]() { return { next: async () => ({value:msgStart(),done:false}), return: async () => ({value:undefined,done:true}) }; },
+  controller: { signal: new AbortController().signal, abort: () => {} },
+};
+const wrapFlat = H.__symBuildThinkingWrapper(TRACE_FLAT, upstreamFlat, null);
+ok('trace=1, no upstream thinking yet: wrapper wraps (returns a new iterator)', wrapFlat !== upstreamFlat && typeof wrapFlat[Symbol.asyncIterator] === 'function');
+
 console.log(`\nRESULT: ${pass} pass, ${fail} fail`);
 process.exit(fail ? 1 : 0);
 } catch (err) {
