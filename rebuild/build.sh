@@ -8,10 +8,13 @@
 #   4. apply_patches : python3 patch.py claude.orig out/claude.patched patches.json
 #   5. smoke         : --version + stage-trace dry-run (decider/judge/translator
 #                      müssen ohne Decider-Misbehavior durchlaufen)
+#   6. tests         : test_thinking_wrapper + test_escalation + test_hooka_fallback
+#                      (unit, HELPER via vm sandbox) + test_e2e (binary + mock)
 #
 # Run:
-#   ./build.sh                # alles, was nicht idempotent passt
-#   ./build.sh rebuild        # erzwingt alle Phasen (clean+fetch_base+...)
+#   ./build.sh                # build + tests (default)
+#   ./build.sh tests          # nur tests (binary muss existieren)
+#   ./build.sh rebuild        # erzwingt alle Phasen (clean+fetch_base+...) + tests
 #   ./build.sh clean          # räumt out/, extracted/, patches.json
 #   ./build.sh inspect        # extrahiert cli.js (für Debug, kein Build)
 #   ./build.sh preflight      # nur Phase 1-3 (Source-Validierung, kein Binary)
@@ -45,18 +48,37 @@ require python3
 require node
 require npm
 
-# Wenn die OUT-Datei läuft, bricht mmap/write fehl.  Suche den Halter-Prozess
-# und beende ihn sauber, bevor wir schreiben.  Idempotent: ohne Lock passiert
-# nichts.
+# Wenn die OUT-Datei läuft, bricht mmap/write fehl ("text file busy") oder
+# die laufende cc-symbolic-Session würde korruptiert.  Finde Prozesse, die
+# die Datei WIRKLICH offen halten (mmap'd executable / open fd), NICHT
+# Prozesse, deren Command-Line den Pfad nur erwähnt — sonst matcht pgrep
+# build.sh selbst, patch.py (hat $OUT in den args) und die aufrufende Shell
+# (self-match), und der Build kann nie schreiben.  fuser prüft echte
+# File-Deskriptoren; Fallback auf /proc/*/exe wenn fuser fehlt.
 release_out_lock() {
     [[ -f "$OUT" ]] || return 0
-    local pids
-    pids="$(pgrep -fa "$OUT" 2>/dev/null | awk '{print $1}' | sort -u || true)"
-    if [[ -n "$pids" ]]; then
-        warn "out/claude.patched is held by: $(echo $pids | tr '\n' ' ')"
-        warn "  (we will NOT kill other users' sessions; please run"
-        warn "   'pkill -f out/claude.patched' in a separate shell, then"
-        warn "   re-run build.sh).  Build aborted."
+    local pids=""
+    if command -v fuser >/dev/null 2>&1; then
+        # fuser prints PIDs to stdout, filename to stderr. PIDs may carry a
+        # one-letter usage code (e/f/r/c) in default mode — strip non-digits.
+        # `|| true` because grep exits 1 (and pipefail + set -e would abort
+        # the whole build) when there are NO holders — which is the normal case.
+        pids="$(fuser "$OUT" 2>/dev/null | tr -cs '0-9' '\n' | grep -E '^[0-9]+$' | sort -u | tr '\n' ' ' || true)"
+    else
+        local abs pid exe
+        abs="$(readlink -f "$OUT")"
+        for pid in /proc/[0-9]*; do
+            exe="$(readlink -f "$pid/exe" 2>/dev/null)" || continue
+            [[ "$exe" == "$abs" ]] && pids="$pids ${pid#/proc/}"
+        done
+        pids="$(echo $pids | tr -s ' ' '\n' | grep -E '^[0-9]+$' | sort -u | tr '\n' ' ' || true)"
+    fi
+    if [[ -n "${pids// /}" ]]; then
+        warn "$OUT is held open by: $(echo $pids | tr '\n' ' ')"
+        warn "  (a running cc-symbolic session has the binary mmap'd — writing now"
+        warn "   would fail with 'text file busy' or corrupt that session.  We will"
+        warn "   NOT kill it automatically.  Run 'pkill -f claude.patched' or close"
+        warn "   the cc-symbolic session, then re-run build.sh.)  Build aborted."
         exit 2
     fi
 }
@@ -124,49 +146,54 @@ phase_smoke() {
         *"${VERSION}"*) ok "version matches ($VERSION)" ;;
         *) warn "version mismatch (expected $VERSION, got: $ver)" ;;
     esac
+    # The 3-stage mock canary (binary vs mock_anthropic_api, 'text file busy' /
+    # 'Spread syntax' / Ti.value / .then regressions) is covered by the
+    # 'tests' phase via test_e2e.sh, which starts its own mock on 18765 and
+    # sets ANTHROPIC_BASE_URL correctly. The old in-smoke canary did NOT set
+    # ANTHROPIC_BASE_URL, so the binary never hit the mock and the empty
+    # `hits=$(grep ...)` aborted the build under `set -euo pipefail`.
+    say "smoke: 3-stage canary deferred to 'tests' phase (test_e2e.sh)"
+}
 
-    say "smoke: 'text file busy' / 'Spread syntax' canary check (with mock)"
-    # Mini-canary gegen mock — bestätigt, dass der symbolic-Pfad überhaupt
-    # triggerbar ist und die Stages durchlaufen, ohne den Mock zu starten.
-    # Wenn MOCK_BIN / Mock-Server fehlt, überspringen wir (kein Hard-Fail).
-    if [[ -x tools/mock_anthropic_api.py ]]; then
-        MOCK_PORT=8765 python3 tools/mock_anthropic_api.py >/tmp/build-mock.log 2>&1 &
-        local mock_pid=$!
-        trap "kill $mock_pid 2>/dev/null || true" EXIT
-        for _ in 1 2 3 4 5 6 7 8; do
-            curl -sS -o /dev/null --max-time 1 "http://127.0.0.1:8765/v1/messages" \
-                -X POST -H 'content-type: application/json' \
-                --data '{"model":"mock-model","max_tokens":1,"messages":[{"role":"user","content":"x"}]}' \
-                2>/dev/null && break
-            sleep 0.3
-        done
-        local tmp; tmp="$(mktemp -d)"
-        if ( cd "$tmp" && MOCK_PORT=8765 symbolic_thinking_debug=1 \
-              timeout 60 "$DIR/out/claude.patched" \
-              --allowedTools 'Read Write Edit Bash' \
-              -p 'Schreibe 42 in answer.txt und bestätige.' \
-              >/tmp/build-run.log 2>&1 ); then
-            local hits
-            hits=$(grep -oE 'stage=(decider|judge|translator)' /tmp/build-mock.log | sort | uniq -c)
-            echo "$hits" | sed 's/^/    /'
-            if echo "$hits" | grep -q 'translator'; then
-                ok "3-stage pipeline hit the mock (decider + judge + translator)"
+phase_tests() {
+    say "running test suites"
+    local fails=0 t
+    # Unit/logic suites (no network, no tokens): HELPER via vm sandbox.
+    for t in test_thinking_wrapper.js test_escalation.js test_hooka_fallback.js; do
+        if [[ -f "$t" ]]; then
+            if node "$t" >/tmp/build-test-${t%.js}.log 2>&1; then
+                ok "$t passed"
             else
-                warn "translator stage did not hit the mock — see /tmp/build-mock.log"
+                err "$t FAILED (see /tmp/build-test-${t%.js}.log)"
+                fails=$((fails+1))
             fi
         else
-            warn "canary run failed (rc=$?) — see /tmp/build-run.log"
+            warn "$t missing — skipping"
         fi
-        rm -rf "$tmp"
-        kill $mock_pid 2>/dev/null || true; trap - EXIT
+    done
+    # E2E: starts a mock Anthropic API + runs the freshly-built binary through
+    # the 3-stage symbolic pipeline. Guards against the original Ti.value /
+    # .then / Unexpected-event-order crashes. ~10s.
+    if [[ -x test_e2e.sh ]]; then
+        if ./test_e2e.sh >/tmp/build-test-e2e.log 2>&1; then
+            ok "test_e2e.sh passed"
+        else
+            err "test_e2e.sh FAILED (see /tmp/build-test-e2e.log)"
+            fails=$((fails+1))
+        fi
     else
-        warn "tools/mock_anthropic_api.py missing — skipping mock canary"
+        warn "test_e2e.sh missing — skipping E2E"
     fi
+    if [[ $fails -gt 0 ]]; then
+        err "$fails test suite(s) failed — build aborted"
+        exit 7
+    fi
+    ok "all test suites passed"
 }
 
 # -------- dispatch ---------------------------------------------------------
 
-PHASES=(fetch_base gen_patches syntax_check apply_patches smoke)
+PHASES=(fetch_base gen_patches syntax_check apply_patches smoke tests)
 
 run_phase() {
     case "$1" in
@@ -175,6 +202,7 @@ run_phase() {
         syntax_check)  phase_syntax_check ;;
         apply_patches) phase_apply_patches ;;
         smoke)         phase_smoke ;;
+        tests)         phase_tests ;;
         *) err "unknown phase: $1"; exit 1 ;;
     esac
 }
@@ -209,6 +237,13 @@ case "${1:-build}" in
         [[ $# -ge 2 ]] || { err "usage: $0 phase NAME"; exit 1; }
         run_phase "$2"
         ;;
+    tests)
+        # Run only the test suites (no build). Requires the binary to exist
+        # for test_e2e.sh; the unit suites load the HELPER from gen_patch.py.
+        [[ -x "$OUT" ]] || { err "tests: $OUT not built — run ./build.sh first"; exit 6; }
+        phase_tests
+        ok "tests complete"
+        ;;
     build|"")
         for p in "${PHASES[@]}"; do run_phase "$p"; done
         ok "build complete"
@@ -218,11 +253,12 @@ case "${1:-build}" in
 build.sh — end-to-end build for the cc-symbolic patched binary.
 
 Usage:
-  ./build.sh                build (idempotent — skips what is already current)
-  ./build.sh rebuild        wipe + rebuild all phases
+  ./build.sh                build + test (idempotent — skips what is current)
+  ./build.sh rebuild        wipe + rebuild all phases + test
+  ./build.sh tests          run only the test suites (build must exist)
   ./build.sh preflight      source-only: gen_patch + syntax check (no binary)
   ./build.sh phase NAME     one phase: fetch_base|gen_patches|syntax_check
-                            |apply_patches|smoke
+                            |apply_patches|smoke|tests
   ./build.sh inspect        extract cli.js (for debugging — no build)
   ./build.sh clean          remove out/ extracted/ patches.json
 
